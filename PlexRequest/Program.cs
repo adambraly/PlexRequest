@@ -24,7 +24,7 @@ class Program
 
         var credential = GoogleCredential
             .GetApplicationDefault()
-            .CreateScoped(SheetsService.Scope.SpreadsheetsReadonly);
+            .CreateScoped(SheetsService.Scope.Spreadsheets);
 
         var service = new SheetsService(new BaseClientService.Initializer
         {
@@ -53,5 +53,20 @@ class Program
 
             Console.WriteLine($"{title} | {type} | {result}");
         }
+
+        var updateRange = "Requests!C2";
+        var body = new Google.Apis.Sheets.v4.Data.ValueRange
+        {
+            Values = new System.Collections.Generic.List<System.Collections.Generic.IList<object>>()
+            {
+                new System.Collections.Generic.List<object>() { "TEST OK" }
+            }
+        };
+
+        var update = service.Spreadsheets.Values.Update(body, sheetId, updateRange);
+        update.ValueInputOption = Google.Apis.Sheets.v4.SpreadsheetsResource.ValuesResource.UpdateRequest.ValueInputOptionEnum.RAW;
+        update.Execute();
+
+        Console.WriteLine("Wrote TEST OK to Requests!C2");
     }
 }
