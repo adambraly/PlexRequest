@@ -18,11 +18,10 @@ class Program
 
         if (string.IsNullOrWhiteSpace(range))
         {
-            Console.Error.WriteLine("Missing env var: GOOGLE_SHEET_RANGE (example: Requests!A2:A)");
+            Console.Error.WriteLine("Missing env var: GOOGLE_SHEET_RANGE (example: Requests!A2:C)");
             Environment.Exit(1);
         }
 
-        // Uses GOOGLE_APPLICATION_CREDENTIALS to find your service-account JSON file
         var credential = GoogleCredential
             .GetApplicationDefault()
             .CreateScoped(SheetsService.Scope.SpreadsheetsReadonly);
@@ -42,11 +41,17 @@ class Program
         }
 
         Console.WriteLine($"Read {resp.Values.Count} row(s) from {range}:");
+        Console.WriteLine("TITLE | TYPE | RESULT");
+
         foreach (var row in resp.Values)
         {
-            var firstCell = row.Count > 0 ? row[0]?.ToString() : "";
-            if (!string.IsNullOrWhiteSpace(firstCell))
-                Console.WriteLine($"- {firstCell}");
+            var title = row.Count > 0 ? row[0]?.ToString()?.Trim() : "";
+            var type = row.Count > 1 ? row[1]?.ToString()?.Trim() : "";
+            var result = row.Count > 2 ? row[2]?.ToString()?.Trim() : "";
+
+            if (string.IsNullOrWhiteSpace(title)) continue; // skip blank rows
+
+            Console.WriteLine($"{title} | {type} | {result}");
         }
     }
 }
