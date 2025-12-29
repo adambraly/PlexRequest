@@ -1,0 +1,14 @@
+# .NET
+bin/
+obj/
+
+# Secrets
+*.json
+!appsettings.example.json
+
+# Environment files
+.env
+.env.*
+
+# Logs
+*.log
