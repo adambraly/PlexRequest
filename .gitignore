@@ -12,3 +12,6 @@ obj/
 
 # Logs
 *.log
+
+#vs
+.vs/
