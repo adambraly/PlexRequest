@@ -115,7 +115,7 @@ To prevent incorrect downloads caused by mistyped IDs:
   - STATUS is set to `NEEDS_ID`
   - RESULT explains what the ID actually refers to
 
-This prevents cases like entering the wrong Firefly TVDB ID and downloading a different show.
+This prevents cases like entering the wrong Serenity TMDB ID and downloading a different movie.
 
 ---
 
