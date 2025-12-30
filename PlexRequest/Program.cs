@@ -1,72 +1,164 @@
 ﻿using System;
-using Google.Apis.Auth.OAuth2;
-using Google.Apis.Services;
-using Google.Apis.Sheets.v4;
+using System.Linq;
+using PlexRequest;
 
-class Program
+internal static class Program
 {
-    static void Main()
+    // Sheet: A TITLE, B TYPE, C ID (required), D RESULT, E STATUS
+    //   TV/ANIME => ID is TVDB
+    //   MOVIE    => ID is TMDB
+    private static void Main()
     {
-        var sheetId = Environment.GetEnvironmentVariable("GOOGLE_SHEET_ID");
-        var range = Environment.GetEnvironmentVariable("GOOGLE_SHEET_RANGE");
+        var cfg = new Config();
 
-        if (string.IsNullOrWhiteSpace(sheetId))
+        var sheets = new GoogleSheetsClient(cfg.GoogleSheetId, cfg.SheetTabName);
+
+        var sonarr = new SonarrClient(
+            cfg.SonarrUrl, cfg.SonarrApiKey,
+            cfg.SonarrRootTv, cfg.SonarrRootAnime,
+            cfg.SonarrQualityProfile);
+
+        var radarr = new RadarrClient(
+            cfg.RadarrUrl, cfg.RadarrApiKey,
+            cfg.RadarrRootMovies,
+            cfg.RadarrQualityProfile);
+
+        sonarr.Initialize();
+        radarr.Initialize();
+
+        var rows = sheets.ReadRows(cfg.GoogleSheetRange, cfg.SheetStartRow);
+        Console.WriteLine($"Read {rows.Count} row(s) from {cfg.GoogleSheetRange}:");
+
+        var processed = 0;
+
+        foreach (var r in rows)
         {
-            Console.Error.WriteLine("Missing env var: GOOGLE_SHEET_ID");
-            Environment.Exit(1);
-        }
+            if (string.IsNullOrWhiteSpace(r.Title))
+                continue;
 
-        if (string.IsNullOrWhiteSpace(range))
-        {
-            Console.Error.WriteLine("Missing env var: GOOGLE_SHEET_RANGE (example: Requests!A2:C)");
-            Environment.Exit(1);
-        }
+            // STATUS is column E
+            var status = sheets.ReadStatusCell(r.SheetRowNumber);
+            var statusUpper = (status ?? "").Trim().ToUpperInvariant();
 
-        var credential = GoogleCredential
-            .GetApplicationDefault()
-            .CreateScoped(SheetsService.Scope.Spreadsheets);
+            bool isNew =
+                string.IsNullOrWhiteSpace(status) ||
+                statusUpper == "NEW" ||
+                statusUpper == "NEEDS_ID";
 
-        var service = new SheetsService(new BaseClientService.Initializer
-        {
-            HttpClientInitializer = credential,
-            ApplicationName = "PlexRequest",
-        });
+            bool isIgnored =
+                statusUpper == "DONE" ||
+                statusUpper == "TRANSFERRED" ||
+                statusUpper == "SKIP";
 
-        var resp = service.Spreadsheets.Values.Get(sheetId, range).Execute();
+            if (!isNew || isIgnored)
+                continue;
 
-        if (resp.Values == null || resp.Values.Count == 0)
-        {
-            Console.WriteLine("No data found in the specified range.");
-            return;
-        }
+            var typeUpper = (r.Type ?? "").Trim().ToUpperInvariant();
 
-        Console.WriteLine($"Read {resp.Values.Count} row(s) from {range}:");
-        Console.WriteLine("TITLE | TYPE | RESULT");
-
-        foreach (var row in resp.Values)
-        {
-            var title = row.Count > 0 ? row[0]?.ToString()?.Trim() : "";
-            var type = row.Count > 1 ? row[1]?.ToString()?.Trim() : "";
-            var result = row.Count > 2 ? row[2]?.ToString()?.Trim() : "";
-
-            if (string.IsNullOrWhiteSpace(title)) continue; // skip blank rows
-
-            Console.WriteLine($"{title} | {type} | {result}");
-        }
-
-        var updateRange = "Requests!C2";
-        var body = new Google.Apis.Sheets.v4.Data.ValueRange
-        {
-            Values = new System.Collections.Generic.List<System.Collections.Generic.IList<object>>()
+            // ID required for ALL request types now
+            if (r.Id == null)
             {
-                new System.Collections.Generic.List<object>() { "TEST OK" }
+                var msg = typeUpper == "MOVIE"
+                    ? "TMDB ID required (column C)"
+                    : "TVDB ID required (column C)";
+
+                sheets.WriteResult(r.SheetRowNumber, msg);
+                sheets.WriteStatus(r.SheetRowNumber, "NEEDS_ID");
+                processed++;
+                continue;
             }
-        };
 
-        var update = service.Spreadsheets.Values.Update(body, sheetId, updateRange);
-        update.ValueInputOption = Google.Apis.Sheets.v4.SpreadsheetsResource.ValuesResource.UpdateRequest.ValueInputOptionEnum.RAW;
-        update.Execute();
+            if (typeUpper == "MOVIE")
+            {
+                // Validate title matches TMDB ID
+                var canonMovieTitle = radarr.GetCanonicalTitleByTmdbId(r.Id.Value);
+                if (string.IsNullOrWhiteSpace(canonMovieTitle) || !TitlesMatch(r.Title, canonMovieTitle))
+                {
+                    sheets.WriteResult(r.SheetRowNumber, $"ID/title mismatch. TMDB {r.Id.Value} is '{canonMovieTitle ?? "NOT FOUND"}'");
+                    sheets.WriteStatus(r.SheetRowNumber, "NEEDS_ID");
+                    processed++;
+                    continue;
+                }
 
-        Console.WriteLine("Wrote TEST OK to Requests!C2");
+                // Now that it's valid, clear NEEDS_ID (if present)
+                if (statusUpper == "NEEDS_ID")
+                    sheets.WriteStatus(r.SheetRowNumber, "");
+
+                var (result, newStatus) = radarr.ProcessMovieByTmdbId(r.Id.Value, r.Title);
+                sheets.WriteResult(r.SheetRowNumber, result);
+                if (!string.IsNullOrWhiteSpace(newStatus))
+                    sheets.WriteStatus(r.SheetRowNumber, newStatus);
+
+                processed++;
+                continue;
+            }
+
+            if (typeUpper != "TV" && typeUpper != "ANIME")
+            {
+                sheets.WriteResult(r.SheetRowNumber, $"Unknown TYPE '{r.Type}' (use TV/ANIME/MOVIE)");
+                processed++;
+                continue;
+            }
+
+            // Validate title matches TVDB ID
+            var canonSeriesTitle = sonarr.GetCanonicalTitleByTvdbId(r.Id.Value);
+            if (string.IsNullOrWhiteSpace(canonSeriesTitle) || !TitlesMatch(r.Title, canonSeriesTitle))
+            {
+                sheets.WriteResult(r.SheetRowNumber, $"ID/title mismatch. TVDB {r.Id.Value} is '{canonSeriesTitle ?? "NOT FOUND"}'");
+                sheets.WriteStatus(r.SheetRowNumber, "NEEDS_ID");
+                processed++;
+                continue;
+            }
+
+            // Now that it's valid, clear NEEDS_ID (if present)
+            if (statusUpper == "NEEDS_ID")
+                sheets.WriteStatus(r.SheetRowNumber, "");
+
+            var existing = sonarr.FindByTvdbId(r.Id.Value);
+            if (existing != null)
+            {
+                // TEMP: remove once verified
+                // sonarr.DebugEpisodes(existing);
+
+                var (result, newStatus) = sonarr.DescribeProgress(existing);
+                sheets.WriteResult(r.SheetRowNumber, result);
+                if (!string.IsNullOrWhiteSpace(newStatus))
+                    sheets.WriteStatus(r.SheetRowNumber, newStatus);
+
+                processed++;
+                continue;
+            }
+
+            var addedResult = sonarr.AddAndSearch(r.Title, typeUpper, r.Id.Value);
+            sheets.WriteResult(r.SheetRowNumber, addedResult);
+            processed++;
+        }
+
+        Console.WriteLine($"Processed {processed} NEW row(s).");
+    }
+
+    // ---------- helpers ----------
+    private static string NormalizeTitle(string s)
+    {
+        s = (s ?? "").Trim().ToUpperInvariant();
+
+        // Keep letters/numbers/spaces only
+        var chars = s.Select(c => char.IsLetterOrDigit(c) ? c : ' ').ToArray();
+        var cleaned = new string(chars);
+
+        // Collapse whitespace
+        return string.Join(" ", cleaned.Split(' ', StringSplitOptions.RemoveEmptyEntries));
+    }
+
+    private static bool TitlesMatch(string userTitle, string canonicalTitle)
+    {
+        var a = NormalizeTitle(userTitle);
+        var b = NormalizeTitle(canonicalTitle);
+
+        if (a.Length == 0 || b.Length == 0) return false;
+        if (a == b) return true;
+
+        // forgiving match either direction
+        return a.Contains(b) || b.Contains(a);
     }
 }
