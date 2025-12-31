@@ -9,6 +9,9 @@ internal static class Program
     //   MOVIE    => ID is TMDB
     private static void Main()
     {
+        var startTime = DateTime.UtcNow;
+        Log("PlexRequest run started");
+
         var cfg = new Config();
 
         var sheets = new GoogleSheetsClient(cfg.GoogleSheetId, cfg.SheetTabName);
@@ -27,7 +30,7 @@ internal static class Program
         radarr.Initialize();
 
         var rows = sheets.ReadRows(cfg.GoogleSheetRange, cfg.SheetStartRow);
-        Console.WriteLine($"Read {rows.Count} row(s) from {cfg.GoogleSheetRange}:");
+        Log($"Read {rows.Count} row(s) from {cfg.GoogleSheetRange}");
 
         var processed = 0;
 
@@ -58,6 +61,8 @@ internal static class Program
             // ID required for ALL request types now
             if (r.Id == null)
             {
+                Log($"Row {r.SheetRowNumber}: missing ID ({typeUpper})");
+
                 var msg = typeUpper == "MOVIE"
                     ? "TMDB ID required (column C)"
                     : "TVDB ID required (column C)";
@@ -74,8 +79,10 @@ internal static class Program
                 var canonMovieTitle = radarr.GetCanonicalTitleByTmdbId(r.Id.Value);
                 if (string.IsNullOrWhiteSpace(canonMovieTitle) || !TitlesMatch(r.Title, canonMovieTitle))
                 {
+                    Log($"Row {r.SheetRowNumber}: ID/title mismatch ({typeUpper}) — '{r.Title}' vs '{canonMovieTitle}'");
                     sheets.WriteResult(r.SheetRowNumber, $"ID/title mismatch. TMDB {r.Id.Value} is '{canonMovieTitle ?? "NOT FOUND"}'");
                     sheets.WriteStatus(r.SheetRowNumber, "NEEDS_ID");
+                    Log($"Row {r.SheetRowNumber}: adding movie to Radarr — '{r.Title}' (TMDB {r.Id.Value})");
                     processed++;
                     continue;
                 }
@@ -87,7 +94,11 @@ internal static class Program
                 var (result, newStatus) = radarr.ProcessMovieByTmdbId(r.Id.Value, r.Title);
                 sheets.WriteResult(r.SheetRowNumber, result);
                 if (!string.IsNullOrWhiteSpace(newStatus))
+                {
                     sheets.WriteStatus(r.SheetRowNumber, newStatus);
+                    if (newStatus == "DONE")
+                        Log($"Row {r.SheetRowNumber}: marked DONE — '{r.Title}' (TV)");
+                }
 
                 processed++;
                 continue;
@@ -104,6 +115,7 @@ internal static class Program
             var canonSeriesTitle = sonarr.GetCanonicalTitleByTvdbId(r.Id.Value);
             if (string.IsNullOrWhiteSpace(canonSeriesTitle) || !TitlesMatch(r.Title, canonSeriesTitle))
             {
+                Log($"Row {r.SheetRowNumber}: ID/title mismatch ({typeUpper}) — '{r.Title}' vs '{canonSeriesTitle}'");
                 sheets.WriteResult(r.SheetRowNumber, $"ID/title mismatch. TVDB {r.Id.Value} is '{canonSeriesTitle ?? "NOT FOUND"}'");
                 sheets.WriteStatus(r.SheetRowNumber, "NEEDS_ID");
                 processed++;
@@ -123,8 +135,12 @@ internal static class Program
                 var (result, newStatus) = sonarr.DescribeProgress(existing);
                 sheets.WriteResult(r.SheetRowNumber, result);
                 if (!string.IsNullOrWhiteSpace(newStatus))
+                {
                     sheets.WriteStatus(r.SheetRowNumber, newStatus);
-
+                    if (newStatus == "DONE")
+                       Log($"Row {r.SheetRowNumber}: marked DONE — '{r.Title}' (TV)");
+                }
+                Log($"Row {r.SheetRowNumber}: adding series to Sonarr — '{r.Title}' (TVDB {r.Id.Value})");
                 processed++;
                 continue;
             }
@@ -134,7 +150,9 @@ internal static class Program
             processed++;
         }
 
-        Console.WriteLine($"Processed {processed} NEW row(s).");
+        var duration = DateTime.UtcNow - startTime;
+        Log($"Processed {processed} row(s) in {duration.TotalSeconds:0.0}s");
+        Log("PlexRequest run finished");
     }
 
     // ---------- helpers ----------
@@ -160,5 +178,10 @@ internal static class Program
 
         // forgiving match either direction
         return a.Contains(b) || b.Contains(a);
+    }
+
+    private static void Log(string message)
+    {
+        Console.WriteLine($"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC] {message}");
     }
 }

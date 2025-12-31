@@ -10,7 +10,6 @@
   <ItemGroup>
     <PackageReference Include="Google.Apis.Auth" Version="1.73.0" />
     <PackageReference Include="Google.Apis.Sheets.V4" Version="1.72.0.3966" />
-    <PackageReference Include="System.Net.Http.Json" Version="10.0.1" />
   </ItemGroup>
 
 </Project>
