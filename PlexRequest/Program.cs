@@ -19,12 +19,16 @@ internal static class Program
         var sonarr = new SonarrClient(
             cfg.SonarrUrl, cfg.SonarrApiKey,
             cfg.SonarrRootTv, cfg.SonarrRootAnime,
-            cfg.SonarrQualityProfile);
+            cfg.SonarrQualityProfile,
+            cfg.ReleaseCheckMinutes,
+            cfg.StaleAfterDays);
 
         var radarr = new RadarrClient(
             cfg.RadarrUrl, cfg.RadarrApiKey,
             cfg.RadarrRootMovies,
-            cfg.RadarrQualityProfile);
+            cfg.RadarrQualityProfile,
+            cfg.ReleaseCheckMinutes,
+            cfg.StaleAfterDays);
 
         sonarr.Initialize();
         radarr.Initialize();

@@ -23,6 +23,10 @@ public sealed class Config
     public string RadarrRootMovies { get; }
     public string RadarrQualityProfile { get; }
 
+    public int ReleaseCheckMinutes { get; }
+    public int StaleAfterDays { get; }
+
+
     public Config()
     {
         GoogleSheetId = Env("GOOGLE_SHEET_ID");
@@ -40,6 +44,9 @@ public sealed class Config
         RadarrApiKey = Env("RADARR_API_KEY");
         RadarrRootMovies = Env("RADARR_ROOT_MOVIES");
         RadarrQualityProfile = Environment.GetEnvironmentVariable("RADARR_QUALITY_PROFILE") ?? "HD - 720p/1080p";
+
+        ReleaseCheckMinutes = EnvInt("RELEASE_CHECK_MINUTES", 1440);
+        StaleAfterDays = EnvInt("STALE_AFTER_DAYS", 30);
     }
 
     private static string Env(string name)

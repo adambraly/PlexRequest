@@ -18,15 +18,24 @@ public sealed class SonarrClient
     private int _qualityProfileId;
     private List<SonarrSeries> _existingSeries = new();
 
-    public SonarrClient(string baseUrl, string apiKey, string rootTv, string rootAnime, string profileName)
+    private readonly int _releaseCheckMinutes;
+    private readonly Dictionary<int, DateTime> _lastReleaseCheckUtc = new();
+
+    private readonly int _staleAfterDays;
+    private readonly Dictionary<int, DateTime> _firstNoReleaseSeenUtc = new();
+
+    public SonarrClient(string baseUrl, string apiKey, string rootTv, string rootAnime, string profileName, int releaseCheckMinutes, int staleAfterDays)
     {
         _rootTv = rootTv;
         _rootAnime = rootAnime;
         _profileName = profileName;
+        _releaseCheckMinutes = releaseCheckMinutes;
+        _staleAfterDays = staleAfterDays;
 
         _http = new HttpClient { BaseAddress = new Uri(baseUrl) };
         _http.DefaultRequestHeaders.Add("X-Api-Key", apiKey);
         _http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
     }
 
     public void Initialize()
@@ -68,8 +77,19 @@ public sealed class SonarrClient
             return ($"In progress ({have}/{total}, {pct:0.0}%) — Next episode airs {local:MMM d yy}", null);
         }
 
+        var (msg, stale) = MaybeNoReleasesMessage(existing.Id);
+        if (!string.IsNullOrWhiteSpace(msg))
+        {
+            if (stale)
+                return (msg, "STALE");
+
+            return ($"In progress ({have}/{total}, {pct:0.0}%) — {msg}", null);
+        }
+
         return ($"In progress ({have}/{total}, {pct:0.0}%) — Waiting for next episode", null);
     }
+
+
 
     public void DebugEpisodes(SonarrSeries series)
     {
@@ -89,7 +109,9 @@ public sealed class SonarrClient
         }
     }
 
-
+    /// <summary>
+    /// TV/Anime releases use TVDB IDs in Sonarr. We require the user to provide TVDB ID in sheet column C for TV/Anime rows.
+    /// </summary>
     public string AddAndSearch(string title, string typeUpper, int tvdbId)
     {
         var chosenRoot = (typeUpper == "ANIME") ? _rootAnime : _rootTv;
@@ -124,9 +146,47 @@ public sealed class SonarrClient
         return (list != null && list.Count > 0) ? list[0].Title : null;
     }
 
+    private (string? message, bool stale) MaybeNoReleasesMessage(int seriesId)
+    {
+        var now = DateTime.UtcNow;
+
+        // Throttle indexer-backed release calls
+        if (_lastReleaseCheckUtc.TryGetValue(seriesId, out var last) &&
+            (now - last).TotalMinutes < _releaseCheckMinutes)
+        {
+            return (null, false);
+        }
+
+        _lastReleaseCheckUtc[seriesId] = now;
+
+        var releases = GetJson<List<SonarrRelease>>($"api/v3/release?seriesId={seriesId}") ?? new();
+
+        if (releases.Count > 0)
+        {
+            _firstNoReleaseSeenUtc.Remove(seriesId);
+            return (null, false);  // throttled
+        }
+
+        // First time we saw "no releases"
+        if (!_firstNoReleaseSeenUtc.ContainsKey(seriesId))
+            _firstNoReleaseSeenUtc[seriesId] = now;
+
+        var ageDays = (now - _firstNoReleaseSeenUtc[seriesId]).TotalDays;
+
+        if (ageDays >= _staleAfterDays)
+            return ("No releases found — marked STALE", true);
+
+        return ("No releases found yet (monitoring)", false);
+    }
+
+
+
+
     // ---------- DTOs ----------
     private sealed class SonarrRootFolder { [JsonPropertyName("path")] public string? Path { get; set; } }
     private sealed class SonarrQualityProfile { [JsonPropertyName("id")] public int Id { get; set; } [JsonPropertyName("name")] public string? Name { get; set; } }
+    private sealed class SonarrRelease { [JsonPropertyName("title")] public string? Title { get; set; } }
+
 
     private sealed class SonarrEpisode
     {

@@ -17,10 +17,18 @@ public sealed class RadarrClient
     private int _qualityProfileId;
     private List<RadarrMovie> _existingMovies = new();
 
-    public RadarrClient(string baseUrl, string apiKey, string rootMovies, string profileName)
+    private readonly int _releaseCheckMinutes;
+    private readonly Dictionary<int, DateTime> _lastReleaseCheckUtc = new();
+
+    private readonly int _staleAfterDays;
+    private readonly Dictionary<int, DateTime> _firstNoReleaseSeenUtc = new();
+
+    public RadarrClient(string baseUrl, string apiKey, string rootMovies, string profileName, int releaseCheckMinutes, int staleAfterDays)
     {
         _rootMovies = rootMovies;
         _profileName = profileName;
+        _releaseCheckMinutes = releaseCheckMinutes;
+        _staleAfterDays = staleAfterDays;
 
         _http = new HttpClient { BaseAddress = new Uri(baseUrl) };
         _http.DefaultRequestHeaders.Add("X-Api-Key", apiKey);
@@ -48,8 +56,37 @@ public sealed class RadarrClient
         if (existing != null)
         {
             if (existing.HasFile) return ("Complete in Radarr", "DONE");
+
+            // If Radarr has this movie in the queue, report real download progress
+            var q = TryGetQueueForMovie(existing.Id);
+            if (q != null)
+            {
+                if (q.Size.HasValue && q.Size.Value > 0 && q.SizeLeft.HasValue)
+                {
+                    var doneBytes = q.Size.Value - q.SizeLeft.Value;
+                    var pct = (double)doneBytes * 100.0 / q.Size.Value;
+
+                    var eta = string.IsNullOrWhiteSpace(q.timeleft) ? "" : $" — ETA {q.timeleft}";
+                    var client = string.IsNullOrWhiteSpace(q.DownloadClient) ? "" : $" via {q.DownloadClient}";
+                    return ($"Downloading {pct:0.0}% ({FormatBytes(doneBytes)}/{FormatBytes(q.Size.Value)}){eta}{client}", null);
+                }
+
+                var qStatus = q.Status ?? q.TrackedDownloadState ?? "Downloading";
+                return ($"{qStatus} (Radarr queue)", null);
+            }
+
+            // Not downloading right now — give “no releases found” / STALE feedback (throttled daily)
+            var (msg, stale) = MaybeNoReleasesMessage(existing.Id);
+            if (!string.IsNullOrWhiteSpace(msg))
+            {
+                if (stale) return (msg, "STALE");
+                return ($"In progress (Radarr - no file yet) — {msg}", null);
+            }
+
+            // 3) Fallback
             return ("In progress (Radarr - no file yet)", null);
         }
+
 
         // Lookup by tmdbId to get canonical title/year (nice for user feedback)
         var lookup = LookupMovieByTmdbId(tmdbId);
@@ -85,12 +122,59 @@ public sealed class RadarrClient
         var lookup = LookupMovieByTmdbId(tmdbId);
         return lookup?.Title;
     }
+    private (string? message, bool stale) MaybeNoReleasesMessage(int movieId)
+    {
+        var now = DateTime.UtcNow;
+
+        // Throttle indexer-backed release calls
+        if (_lastReleaseCheckUtc.TryGetValue(movieId, out var last) &&
+            (now - last).TotalMinutes < _releaseCheckMinutes)
+        {
+            return (null, false);
+        }
+
+        _lastReleaseCheckUtc[movieId] = now;
+
+        var releases = GetJson<List<RadarrRelease>>($"api/v3/release?movieId={movieId}") ?? new();
+
+        if (releases.Count > 0)
+        {
+            _firstNoReleaseSeenUtc.Remove(movieId);
+            return (null, false); // throttled
+        }
+
+        // First time we saw "no releases"
+        if (!_firstNoReleaseSeenUtc.ContainsKey(movieId))
+            _firstNoReleaseSeenUtc[movieId] = now;
+
+        var ageDays = (now - _firstNoReleaseSeenUtc[movieId]).TotalDays;
+
+        if (ageDays >= _staleAfterDays)
+            return ("No releases found — marked STALE", true);
+
+        return ("No releases found yet (monitoring)", false);
+    }
 
 
     // ---------- DTOs ----------
     private sealed class RadarrRootFolder { [JsonPropertyName("path")] public string? Path { get; set; } }
     private sealed class RadarrQualityProfile { [JsonPropertyName("id")] public int Id { get; set; } [JsonPropertyName("name")] public string? Name { get; set; } }
+    private sealed class RadarrRelease { [JsonPropertyName("title")] public string? Title { get; set; } }
+    private sealed class RadarrQueueResponse { [JsonPropertyName("records")] public List<RadarrQueueRecord>? Records { get; set; } }
 
+    private sealed class RadarrQueueRecord
+    {
+        [JsonPropertyName("movieId")] public int? MovieId { get; set; }
+        [JsonPropertyName("title")] public string? Title { get; set; }
+
+        [JsonPropertyName("size")] public long? Size { get; set; }         // bytes
+        [JsonPropertyName("sizeleft")] public long? SizeLeft { get; set; } // bytes
+        [JsonPropertyName("timeleft")] public string? timeleft { get; set; }
+
+        [JsonPropertyName("status")] public string? Status { get; set; }   // e.g. "downloading"
+        [JsonPropertyName("trackedDownloadState")] public string? TrackedDownloadState { get; set; }
+        [JsonPropertyName("downloadClient")] public string? DownloadClient { get; set; }
+    }
     private sealed class RadarrMovie
     {
         [JsonPropertyName("id")] public int Id { get; set; }
@@ -127,6 +211,27 @@ public sealed class RadarrClient
     }
 
     // ---------- helpers ----------
+    private RadarrQueueRecord? TryGetQueueForMovie(int movieId)
+    {
+        var resp = GetJson<RadarrQueueResponse>("api/v3/queue?page=1&pageSize=200") ?? new RadarrQueueResponse();
+        var records = resp.Records ?? new List<RadarrQueueRecord>();
+
+        return records.FirstOrDefault(r => r.MovieId == movieId);
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        string[] sizes = { "B", "KB", "MB", "GB", "TB" };
+        double len = bytes;
+        int order = 0;
+        while (len >= 1024 && order < sizes.Length - 1)
+        {
+            order++;
+            len /= 1024;
+        }
+        return $"{len:0.##} {sizes[order]}";
+    }
+
     private RadarrLookupMovie? LookupMovieByTmdbId(int tmdbId)
     {
         // Radarr supports lookup by tmdb:<id>
