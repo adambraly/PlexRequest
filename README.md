@@ -71,6 +71,9 @@ The STATUS column controls how requests are handled.
   The request is missing or has an invalid/mismatched ID.  
   PlexRequest will re-check this row on every run until corrected.
 
+  - `IN_PROGRESS`  
+  The request is currently searching indexers or is currently downloading.
+
 ### Terminal States
 
 - `DONE`  
