@@ -62,7 +62,13 @@ public sealed class SonarrClient
         if (have >= total)
             return ("Complete in Sonarr", "DONE");
 
-        return ($"In progress ({have}/{total}, {pct:0.0}%)", null);
+        if (existing.NextAiring != null)
+        {
+            var local = existing.NextAiring.Value.ToLocalTime();
+            return ($"In progress ({have}/{total}, {pct:0.0}%) — Next episode airs {local:MMM d yy}", null);
+        }
+
+        return ($"In progress ({have}/{total}, {pct:0.0}%) — Waiting for next episode", null);
     }
 
     public void DebugEpisodes(SonarrSeries series)
@@ -152,6 +158,7 @@ public sealed class SonarrClient
         [JsonPropertyName("title")] public string? Title { get; set; }
         [JsonPropertyName("tvdbId")] public int? TvdbId { get; set; }
         [JsonPropertyName("statistics")] public SonarrSeriesStatistics? Statistics { get; set; }
+        [JsonPropertyName("nextAiring")] public DateTime? NextAiring { get; set; }
     }
 
     private sealed class SonarrAddOptions { [JsonPropertyName("searchForMissingEpisodes")] public bool SearchForMissingEpisodes { get; set; } = true; }
