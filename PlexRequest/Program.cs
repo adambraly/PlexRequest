@@ -47,17 +47,19 @@ internal static class Program
             var status = sheets.ReadStatusCell(r.SheetRowNumber);
             var statusUpper = (status ?? "").Trim().ToUpperInvariant();
 
-            bool isNew =
+            bool isProcessable =
                 string.IsNullOrWhiteSpace(status) ||
                 statusUpper == "NEW" ||
-                statusUpper == "NEEDS_ID";
+                statusUpper == "NEEDS_ID" ||
+                statusUpper == "IN_PROGRESS";
 
             bool isIgnored =
                 statusUpper == "DONE" ||
                 statusUpper == "TRANSFERRED" ||
-                statusUpper == "SKIP";
+                statusUpper == "SKIP" ||
+                statusUpper == "STALE";
 
-            if (!isNew || isIgnored)
+            if (!isProcessable || isIgnored)
                 continue;
 
             var typeUpper = (r.Type ?? "").Trim().ToUpperInvariant();
@@ -65,7 +67,8 @@ internal static class Program
             // ID required for ALL request types now
             if (r.Id == null)
             {
-                Log($"Row {r.SheetRowNumber}: missing ID ({typeUpper})");
+                LogRow(r.SheetRowNumber, "NEEDS_ID", "Request", r.Title, typeUpper,
+                    typeUpper == "MOVIE" ? "TMDB" : "TVDB", null);
 
                 var msg = typeUpper == "MOVIE"
                     ? "TMDB ID required (column C)"
@@ -83,10 +86,11 @@ internal static class Program
                 var canonMovieTitle = radarr.GetCanonicalTitleByTmdbId(r.Id.Value);
                 if (string.IsNullOrWhiteSpace(canonMovieTitle) || !TitlesMatch(r.Title, canonMovieTitle))
                 {
-                    Log($"Row {r.SheetRowNumber}: ID/title mismatch ({typeUpper}) — '{r.Title}' vs '{canonMovieTitle}'");
+                    LogRow(r.SheetRowNumber, "ID_MISMATCH", "Movie", r.Title, typeUpper, "TMDB", r.Id,
+                        $"canonical='{canonMovieTitle ?? "NOT FOUND"}'");
+
                     sheets.WriteResult(r.SheetRowNumber, $"ID/title mismatch. TMDB {r.Id.Value} is '{canonMovieTitle ?? "NOT FOUND"}'");
                     sheets.WriteStatus(r.SheetRowNumber, "NEEDS_ID");
-                    Log($"Row {r.SheetRowNumber}: adding movie to Radarr — '{r.Title}' (TMDB {r.Id.Value})");
                     processed++;
                     continue;
                 }
@@ -97,11 +101,27 @@ internal static class Program
 
                 var (result, newStatus) = radarr.ProcessMovieByTmdbId(r.Id.Value, r.Title);
                 sheets.WriteResult(r.SheetRowNumber, result);
+
+                if (result.StartsWith("Added to Radarr"))
+                {
+                    LogRow(r.SheetRowNumber, "ADDED", "Movie", r.Title, typeUpper, "TMDB", r.Id);
+                }
+
                 if (!string.IsNullOrWhiteSpace(newStatus))
                 {
                     sheets.WriteStatus(r.SheetRowNumber, newStatus);
                     if (newStatus == "DONE")
-                        Log($"Row {r.SheetRowNumber}: marked DONE — '{r.Title}' (TV)");
+                        LogRow(r.SheetRowNumber, "DONE", "Movie", r.Title, typeUpper, "TMDB", r.Id);
+                }
+                else
+                {
+                    // Valid + tracked, but not complete/terminal
+                    sheets.WriteStatus(r.SheetRowNumber, "IN_PROGRESS");
+                }
+
+                if (newStatus == "STALE")
+                {
+                    LogRow(r.SheetRowNumber, "STALE", "Movie", r.Title, typeUpper, "TMDB", r.Id, $"result='{result}'");
                 }
 
                 processed++;
@@ -119,7 +139,8 @@ internal static class Program
             var canonSeriesTitle = sonarr.GetCanonicalTitleByTvdbId(r.Id.Value);
             if (string.IsNullOrWhiteSpace(canonSeriesTitle) || !TitlesMatch(r.Title, canonSeriesTitle))
             {
-                Log($"Row {r.SheetRowNumber}: ID/title mismatch ({typeUpper}) — '{r.Title}' vs '{canonSeriesTitle}'");
+                LogRow(r.SheetRowNumber, "ID_MISMATCH", "Series", r.Title, typeUpper, "TVDB", r.Id,
+                    $"canonical='{canonSeriesTitle ?? "NOT FOUND"}'");
                 sheets.WriteResult(r.SheetRowNumber, $"ID/title mismatch. TVDB {r.Id.Value} is '{canonSeriesTitle ?? "NOT FOUND"}'");
                 sheets.WriteStatus(r.SheetRowNumber, "NEEDS_ID");
                 processed++;
@@ -142,15 +163,32 @@ internal static class Program
                 {
                     sheets.WriteStatus(r.SheetRowNumber, newStatus);
                     if (newStatus == "DONE")
-                       Log($"Row {r.SheetRowNumber}: marked DONE — '{r.Title}' (TV)");
+                       LogRow(r.SheetRowNumber, "DONE", "Series", r.Title, typeUpper, "TVDB", r.Id);
                 }
-                Log($"Row {r.SheetRowNumber}: adding series to Sonarr — '{r.Title}' (TVDB {r.Id.Value})");
+                else
+                {
+                    sheets.WriteStatus(r.SheetRowNumber, "IN_PROGRESS");
+                }
+
+                if (newStatus == "STALE")
+                {
+                    LogRow(r.SheetRowNumber, "STALE", "Series", r.Title, typeUpper, "TVDB", r.Id, $"result='{result}'");
+                }
+                
+                if (string.IsNullOrWhiteSpace(newStatus))
+                {
+                    LogRow(r.SheetRowNumber, "UPDATED", "Series", r.Title, typeUpper, "TVDB", r.Id,
+                        $"result='{result}'");
+                }
+                
                 processed++;
                 continue;
             }
 
             var addedResult = sonarr.AddAndSearch(r.Title, typeUpper, r.Id.Value);
             sheets.WriteResult(r.SheetRowNumber, addedResult);
+            sheets.WriteStatus(r.SheetRowNumber, "IN_PROGRESS");
+            LogRow(r.SheetRowNumber, "ADDED", "Series", r.Title, typeUpper, "TVDB", r.Id);
             processed++;
         }
 
@@ -183,9 +221,17 @@ internal static class Program
         // forgiving match either direction
         return a.Contains(b) || b.Contains(a);
     }
+    private static void LogRow(int rowNumber, string action, string mediaKind, string title, string typeUpper, string idKind, int? id, string? details = null)
+    {
+        var idPart = id.HasValue ? $"{idKind} {id.Value}" : $"{idKind} (missing)";
+        var detailsPart = string.IsNullOrWhiteSpace(details) ? "" : $" [{details}]";
+        Log($"Row {rowNumber}: {action} {mediaKind} — '{title}' ({typeUpper}, {idPart}){detailsPart}");
+    }
 
     private static void Log(string message)
     {
         Console.WriteLine($"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC] {message}");
     }
+
+
 }

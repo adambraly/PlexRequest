@@ -74,7 +74,7 @@ public sealed class SonarrClient
         if (existing.NextAiring != null)
         {
             var local = existing.NextAiring.Value.ToLocalTime();
-            return ($"In progress ({have}/{total}, {pct:0.0}%) — Next episode airs {local:MMM d yy}", null);
+            return ($"In progress ({have}/{total}, {pct:0.0}%) — Next episode airs {local:MMM d, yyyy}", null);
         }
 
         var (msg, stale) = MaybeNoReleasesMessage(existing.Id);
