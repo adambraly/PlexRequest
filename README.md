@@ -82,6 +82,9 @@ The STATUS column controls how requests are handled.
 - `SKIP`  
   The request is intentionally ignored (bad request, already owned, etc.).
 
+- `STALE`  
+  Requests that have been active for multiple days and are unable to be retrieved by indexers are marked as stale.
+
 Terminal states are never reprocessed.
 
 ---
