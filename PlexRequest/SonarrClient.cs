@@ -16,12 +16,11 @@ public sealed class SonarrClient
     private readonly string _profileName;
 
     private int _qualityProfileId;
-    private List<SonarrSeries> _existingSeries = new();
-
     private readonly int _releaseCheckMinutes;
-    private readonly Dictionary<int, DateTime> _lastReleaseCheckUtc = new();
-
     private readonly int _staleAfterDays;
+
+    private List<SonarrSeries> _existingSeries = new();
+    private readonly Dictionary<int, DateTime> _lastReleaseCheckUtc = new();
     private readonly Dictionary<int, DateTime> _firstNoReleaseSeenUtc = new();
 
     public SonarrClient(string baseUrl, string apiKey, string rootTv, string rootAnime, string profileName, int releaseCheckMinutes, int staleAfterDays)
@@ -51,17 +50,34 @@ public sealed class SonarrClient
         _existingSeries = GetJson<List<SonarrSeries>>("api/v3/series") ?? new();
     }
 
-    public SonarrSeries? FindByTvdbId(int tvdbId)
-        => _existingSeries.FirstOrDefault(s => s.TvdbId == tvdbId);
+    /// <summary>
+    /// TV/Anime use TVDB IDs in Sonarr. We require TVDB ID in sheet column C for TV/ANIME rows.
+    /// </summary>
+    public (string result, string? status, RequestAction action) ProcessSeriesByTvdbId(int tvdbId, string titleForDisplay, string typeUpper)
+    {
+        var existing = _existingSeries.FirstOrDefault(s => s.TvdbId == tvdbId);
+        if (existing != null)
+        {
+            return DescribeProgress(existing);
+        }
 
-    public (string result, string? status) DescribeProgress(SonarrSeries existing)
+        var (addedResult, addedAction) = AddAndSearch(titleForDisplay, typeUpper, tvdbId);
+
+        if (addedAction == RequestAction.None)
+            return (addedResult, null, RequestAction.None);
+
+        return (addedResult, null, RequestAction.Added);
+    }
+
+
+    private (string result, string? status, RequestAction action) DescribeProgress(SonarrSeries existing)
     {
         // Use episodes for accurate completion, ignoring specials (season 0)
         var episodes = GetEpisodes(existing.Id);
 
         var normal = episodes.Where(e => e.SeasonNumber > 0).ToList();
         if (normal.Count == 0)
-            return ("Already added in Sonarr (no episodes returned)", null);
+            return ("Already added in Sonarr (no episodes returned)", null, RequestAction.Updated);
 
         var have = normal.Count(e => e.HasFile);
         var total = normal.Count;
@@ -69,50 +85,28 @@ public sealed class SonarrClient
         var pct = (total == 0) ? 0.0 : (have * 100.0 / total);
 
         if (have >= total)
-            return ("Complete in Sonarr", "DONE");
+            return ("Complete in Sonarr", "DONE", RequestAction.Completed);
 
         if (existing.NextAiring != null)
         {
             var local = existing.NextAiring.Value.ToLocalTime();
-            return ($"In progress ({have}/{total}, {pct:0.0}%) — Next episode airs {local:MMM d, yyyy}", null);
+            return ($"In progress ({have}/{total}, {pct:0.0}%) — Next episode airs {local:MMM d, yyyy}", null, RequestAction.Updated);
         }
 
         var (msg, stale) = MaybeNoReleasesMessage(existing.Id);
         if (!string.IsNullOrWhiteSpace(msg))
         {
             if (stale)
-                return (msg, "STALE");
+                return (msg, "STALE", RequestAction.Stale);
 
-            return ($"In progress ({have}/{total}, {pct:0.0}%) — {msg}", null);
+            return ($"In progress ({have}/{total}, {pct:0.0}%) — {msg}", null, RequestAction.Updated);
         }
 
-        return ($"In progress ({have}/{total}, {pct:0.0}%) — Waiting for next episode", null);
+        return ($"In progress ({have}/{total}, {pct:0.0}%) — Waiting for next episode", null, RequestAction.Updated);
     }
 
 
-
-    public void DebugEpisodes(SonarrSeries series)
-    {
-        var episodes = GetEpisodes(series.Id);
-
-        Console.WriteLine($"DEBUG Episodes for '{series.Title}' (seriesId={series.Id}, tvdbId={series.TvdbId}): total={episodes.Count}");
-
-        var bySeason = episodes
-            .GroupBy(e => e.SeasonNumber)
-            .OrderBy(g => g.Key);
-
-        foreach (var g in bySeason)
-        {
-            var total = g.Count();
-            var have = g.Count(e => e.HasFile);
-            Console.WriteLine($"  Season {g.Key}: {have}/{total} hasFile");
-        }
-    }
-
-    /// <summary>
-    /// TV/Anime releases use TVDB IDs in Sonarr. We require the user to provide TVDB ID in sheet column C for TV/Anime rows.
-    /// </summary>
-    public string AddAndSearch(string title, string typeUpper, int tvdbId)
+    private (string result, RequestAction action) AddAndSearch(string title, string typeUpper, int tvdbId)
     {
         var chosenRoot = (typeUpper == "ANIME") ? _rootAnime : _rootTv;
         var seriesType = (typeUpper == "ANIME") ? "anime" : "standard";
@@ -130,12 +124,12 @@ public sealed class SonarrClient
         };
 
         var added = PostJson<SonarrSeries>("api/v3/series", addReq);
-        if (added == null) return "Failed to add series (unknown error)";
+        if (added == null) return ("Failed to add series (unknown error)", RequestAction.None);
 
         PostJson<object>("api/v3/command", new SonarrCommandRequest { Name = "SeriesSearch", SeriesId = added.Id });
 
         _existingSeries.Add(added);
-        return "Added to Sonarr + searching";
+        return ("Added to Sonarr + searching", RequestAction.Added);
     }
 
     public string? GetCanonicalTitleByTvdbId(int tvdbId)
@@ -179,7 +173,23 @@ public sealed class SonarrClient
         return ("No releases found yet (monitoring)", false);
     }
 
+    public void DebugEpisodes(SonarrSeries series)
+    {
+        var episodes = GetEpisodes(series.Id);
 
+        Console.WriteLine($"DEBUG Episodes for '{series.Title}' (seriesId={series.Id}, tvdbId={series.TvdbId}): total={episodes.Count}");
+
+        var bySeason = episodes
+            .GroupBy(e => e.SeasonNumber)
+            .OrderBy(g => g.Key);
+
+        foreach (var g in bySeason)
+        {
+            var total = g.Count();
+            var have = g.Count(e => e.HasFile);
+            Console.WriteLine($"  Season {g.Key}: {have}/{total} hasFile");
+        }
+    }
 
 
     // ---------- DTOs ----------

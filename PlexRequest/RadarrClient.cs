@@ -15,12 +15,11 @@ public sealed class RadarrClient
     private readonly string _profileName;
 
     private int _qualityProfileId;
-    private List<RadarrMovie> _existingMovies = new();
-
     private readonly int _releaseCheckMinutes;
-    private readonly Dictionary<int, DateTime> _lastReleaseCheckUtc = new();
-
     private readonly int _staleAfterDays;
+
+    private List<RadarrMovie> _existingMovies = new();
+    private readonly Dictionary<int, DateTime> _lastReleaseCheckUtc = new();
     private readonly Dictionary<int, DateTime> _firstNoReleaseSeenUtc = new();
 
     public RadarrClient(string baseUrl, string apiKey, string rootMovies, string profileName, int releaseCheckMinutes, int staleAfterDays)
@@ -50,12 +49,12 @@ public sealed class RadarrClient
     /// <summary>
     /// Movies use TMDB IDs in Radarr. We require the user to provide TMDB ID in sheet column C for MOVIE rows.
     /// </summary>
-    public (string result, string? status) ProcessMovieByTmdbId(int tmdbId, string titleForDisplay)
+    public (string result, string? status, RequestAction action) ProcessMovieByTmdbId(int tmdbId, string titleForDisplay)
     {
         var existing = _existingMovies.FirstOrDefault(m => m.TmdbId == tmdbId);
         if (existing != null)
         {
-            if (existing.HasFile) return ("Complete in Radarr", "DONE");
+            if (existing.HasFile) return ("Complete in Radarr", "DONE", RequestAction.Completed);
 
             // If Radarr has this movie in the queue, report real download progress
             var q = TryGetQueueForMovie(existing.Id);
@@ -68,30 +67,30 @@ public sealed class RadarrClient
 
                     var eta = string.IsNullOrWhiteSpace(q.timeleft) ? "" : $" — ETA {q.timeleft}";
                     var client = string.IsNullOrWhiteSpace(q.DownloadClient) ? "" : $" via {q.DownloadClient}";
-                    return ($"Downloading {pct:0.0}% ({FormatBytes(doneBytes)}/{FormatBytes(q.Size.Value)}){eta}{client}", null);
+                    return ($"Downloading {pct:0.0}% ({FormatBytes(doneBytes)}/{FormatBytes(q.Size.Value)}){eta}{client}", null, RequestAction.Updated);
                 }
 
                 var qStatus = q.Status ?? q.TrackedDownloadState ?? "Downloading";
-                return ($"{qStatus} (Radarr queue)", null);
+                return ($"{qStatus} (Radarr queue)", null, RequestAction.Updated);
             }
 
             // Not downloading right now — give “no releases found” / STALE feedback (throttled daily)
             var (msg, stale) = MaybeNoReleasesMessage(existing.Id);
             if (!string.IsNullOrWhiteSpace(msg))
             {
-                if (stale) return (msg, "STALE");
-                return ($"In progress (Radarr - no file yet) — {msg}", null);
+                if (stale) return (msg, "STALE", RequestAction.Stale);
+                return ($"In progress (Radarr - no file yet) — {msg}", null, RequestAction.Updated);
             }
 
             // 3) Fallback
-            return ("In progress (Radarr - no file yet)", null);
+            return ("In progress (Radarr - no file yet)", null, RequestAction.Updated);
         }
 
 
         // Lookup by tmdbId to get canonical title/year (nice for user feedback)
         var lookup = LookupMovieByTmdbId(tmdbId);
         if (lookup == null)
-            return ($"TMDB ID {tmdbId} not found in Radarr lookup", "SKIP");
+            return ($"TMDB ID {tmdbId} not found in Radarr lookup", "SKIP", RequestAction.None);
 
         var addReq = new RadarrAddMovieRequest
         {
@@ -105,7 +104,7 @@ public sealed class RadarrClient
         };
 
         var added = PostJson<RadarrMovie>("api/v3/movie", addReq);
-        if (added == null) return ("Failed to add movie (unknown error)", null);
+        if (added == null) return ("Failed to add movie (unknown error)", null, RequestAction.None);
 
         PostJson<object>("api/v3/command", new RadarrCommandRequest
         {
@@ -114,7 +113,7 @@ public sealed class RadarrClient
         });
 
         _existingMovies.Add(added);
-        return ("Added to Radarr + searching", null);
+        return ("Added to Radarr + searching", null, RequestAction.Added);
     }
 
     public string? GetCanonicalTitleByTmdbId(int tmdbId)

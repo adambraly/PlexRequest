@@ -62,134 +62,95 @@ internal static class Program
             if (!isProcessable || isIgnored)
                 continue;
 
-            var typeUpper = (r.Type ?? "").Trim().ToUpperInvariant();
+            var kind = GetKind(r.Type);
+            var typeUpper = (r.Type ?? "").Trim().ToUpperInvariant(); // keep for display/logs
+            var idKind = GetIdKind(kind);
+            var mediaKind = GetMediaKind(kind);
+
+            // If TYPE is invalid, tell them that before complaining about ID
+            if (kind == RequestKind.Unknown)
+            {
+                var result = $"Unknown TYPE '{r.Type}' (use TV/ANIME/MOVIE)";
+                sheets.WriteResult(r.SheetRowNumber, result);
+
+                WriteStatusFromAction(sheets, r.SheetRowNumber, null, RequestAction.BadType);
+                LogFromAction(r.SheetRowNumber, "Request", r.Title, typeUpper, "ID", null, result, RequestAction.BadType);
+
+                processed++;
+                continue;
+
+            }
 
             // ID required for ALL request types now
             if (r.Id == null)
             {
-                LogRow(r.SheetRowNumber, "NEEDS_ID", "Request", r.Title, typeUpper,
-                    typeUpper == "MOVIE" ? "TMDB" : "TVDB", null);
-
-                var msg = typeUpper == "MOVIE"
-                    ? "TMDB ID required (column C)"
-                    : "TVDB ID required (column C)";
-
-                sheets.WriteResult(r.SheetRowNumber, msg);
-                sheets.WriteStatus(r.SheetRowNumber, "NEEDS_ID");
-                processed++;
-                continue;
-            }
-
-            if (typeUpper == "MOVIE")
-            {
-                // Validate title matches TMDB ID
-                var canonMovieTitle = radarr.GetCanonicalTitleByTmdbId(r.Id.Value);
-                if (string.IsNullOrWhiteSpace(canonMovieTitle) || !TitlesMatch(r.Title, canonMovieTitle))
-                {
-                    LogRow(r.SheetRowNumber, "ID_MISMATCH", "Movie", r.Title, typeUpper, "TMDB", r.Id,
-                        $"canonical='{canonMovieTitle ?? "NOT FOUND"}'");
-
-                    sheets.WriteResult(r.SheetRowNumber, $"ID/title mismatch. TMDB {r.Id.Value} is '{canonMovieTitle ?? "NOT FOUND"}'");
-                    sheets.WriteStatus(r.SheetRowNumber, "NEEDS_ID");
-                    processed++;
-                    continue;
-                }
-
-                // Now that it's valid, clear NEEDS_ID (if present)
-                if (statusUpper == "NEEDS_ID")
-                    sheets.WriteStatus(r.SheetRowNumber, "");
-
-                var (result, newStatus) = radarr.ProcessMovieByTmdbId(r.Id.Value, r.Title);
+                var result = kind == RequestKind.Movie
+                     ? "TMDB ID required (column C)"
+                     : "TVDB ID required (column C)";
                 sheets.WriteResult(r.SheetRowNumber, result);
 
-                if (result.StartsWith("Added to Radarr"))
-                {
-                    LogRow(r.SheetRowNumber, "ADDED", "Movie", r.Title, typeUpper, "TMDB", r.Id);
-                }
-
-                if (!string.IsNullOrWhiteSpace(newStatus))
-                {
-                    sheets.WriteStatus(r.SheetRowNumber, newStatus);
-                    if (newStatus == "DONE")
-                        LogRow(r.SheetRowNumber, "DONE", "Movie", r.Title, typeUpper, "TMDB", r.Id);
-                }
-                else
-                {
-                    // Valid + tracked, but not complete/terminal
-                    sheets.WriteStatus(r.SheetRowNumber, "IN_PROGRESS");
-                }
-
-                if (newStatus == "STALE")
-                {
-                    LogRow(r.SheetRowNumber, "STALE", "Movie", r.Title, typeUpper, "TMDB", r.Id, $"result='{result}'");
-                }
+                WriteStatusFromAction(sheets, r.SheetRowNumber, null, RequestAction.NeedsId);
+                LogFromAction(r.SheetRowNumber, mediaKind, r.Title, typeUpper, idKind, null, result, RequestAction.NeedsId);
 
                 processed++;
                 continue;
             }
 
-            if (typeUpper != "TV" && typeUpper != "ANIME")
+            switch (kind)
             {
-                sheets.WriteResult(r.SheetRowNumber, $"Unknown TYPE '{r.Type}' (use TV/ANIME/MOVIE)");
-                processed++;
-                continue;
+                case RequestKind.Movie:
+                    {
+                        // Validate title matches TMDB ID
+                        var canonMovieTitle = radarr.GetCanonicalTitleByTmdbId(r.Id.Value);
+                        if (string.IsNullOrWhiteSpace(canonMovieTitle) || !TitlesMatch(r.Title, canonMovieTitle))
+                        {
+                            HandleIdMismatch(sheets, r.SheetRowNumber, mediaKind, r.Title, 
+                                typeUpper, idKind,r.Id.Value, canonMovieTitle);
+
+                            processed++;
+                            break;
+                        }
+
+                        var (result, newStatus, action) = radarr.ProcessMovieByTmdbId(r.Id.Value, r.Title);
+
+                        sheets.WriteResult(r.SheetRowNumber, result);
+                        WriteStatusFromAction(sheets, r.SheetRowNumber, newStatus, action);
+                        
+                        LogFromAction(r.SheetRowNumber, mediaKind, r.Title, typeUpper, idKind, r.Id.Value, result, action);
+                        processed++;
+                        break;
+                    }
+
+                case RequestKind.Series:
+                    {
+                        // Validate title matches TVDB ID
+                        var canonSeriesTitle = sonarr.GetCanonicalTitleByTvdbId(r.Id.Value);
+                        if (string.IsNullOrWhiteSpace(canonSeriesTitle) || !TitlesMatch(r.Title, canonSeriesTitle))
+                        {
+                            HandleIdMismatch(sheets, r.SheetRowNumber, mediaKind, r.Title,
+                                typeUpper, idKind, r.Id.Value, canonSeriesTitle);
+
+                            processed++;
+                            break;
+                        }
+
+                        var (result, newStatus, action) = sonarr.ProcessSeriesByTvdbId(r.Id.Value, r.Title, typeUpper);
+                        
+                        sheets.WriteResult(r.SheetRowNumber, result);
+                        WriteStatusFromAction(sheets, r.SheetRowNumber, newStatus, action);
+
+                        LogFromAction(r.SheetRowNumber, mediaKind, r.Title, typeUpper, idKind, r.Id.Value, result, action);
+                        processed++;
+                        break;
+                    }
+
+                default:
+                    {
+                        sheets.WriteResult(r.SheetRowNumber, $"Unknown TYPE '{r.Type}' (use TV/ANIME/MOVIE)");
+                        processed++;
+                        break;
+                    }
             }
-
-            // Validate title matches TVDB ID
-            var canonSeriesTitle = sonarr.GetCanonicalTitleByTvdbId(r.Id.Value);
-            if (string.IsNullOrWhiteSpace(canonSeriesTitle) || !TitlesMatch(r.Title, canonSeriesTitle))
-            {
-                LogRow(r.SheetRowNumber, "ID_MISMATCH", "Series", r.Title, typeUpper, "TVDB", r.Id,
-                    $"canonical='{canonSeriesTitle ?? "NOT FOUND"}'");
-                sheets.WriteResult(r.SheetRowNumber, $"ID/title mismatch. TVDB {r.Id.Value} is '{canonSeriesTitle ?? "NOT FOUND"}'");
-                sheets.WriteStatus(r.SheetRowNumber, "NEEDS_ID");
-                processed++;
-                continue;
-            }
-
-            // Now that it's valid, clear NEEDS_ID (if present)
-            if (statusUpper == "NEEDS_ID")
-                sheets.WriteStatus(r.SheetRowNumber, "");
-
-            var existing = sonarr.FindByTvdbId(r.Id.Value);
-            if (existing != null)
-            {
-                // TEMP: remove once verified
-                // sonarr.DebugEpisodes(existing);
-
-                var (result, newStatus) = sonarr.DescribeProgress(existing);
-                sheets.WriteResult(r.SheetRowNumber, result);
-                if (!string.IsNullOrWhiteSpace(newStatus))
-                {
-                    sheets.WriteStatus(r.SheetRowNumber, newStatus);
-                    if (newStatus == "DONE")
-                       LogRow(r.SheetRowNumber, "DONE", "Series", r.Title, typeUpper, "TVDB", r.Id);
-                }
-                else
-                {
-                    sheets.WriteStatus(r.SheetRowNumber, "IN_PROGRESS");
-                }
-
-                if (newStatus == "STALE")
-                {
-                    LogRow(r.SheetRowNumber, "STALE", "Series", r.Title, typeUpper, "TVDB", r.Id, $"result='{result}'");
-                }
-                
-                if (string.IsNullOrWhiteSpace(newStatus))
-                {
-                    LogRow(r.SheetRowNumber, "UPDATED", "Series", r.Title, typeUpper, "TVDB", r.Id,
-                        $"result='{result}'");
-                }
-                
-                processed++;
-                continue;
-            }
-
-            var addedResult = sonarr.AddAndSearch(r.Title, typeUpper, r.Id.Value);
-            sheets.WriteResult(r.SheetRowNumber, addedResult);
-            sheets.WriteStatus(r.SheetRowNumber, "IN_PROGRESS");
-            LogRow(r.SheetRowNumber, "ADDED", "Series", r.Title, typeUpper, "TVDB", r.Id);
-            processed++;
         }
 
         var duration = DateTime.UtcNow - startTime;
@@ -198,6 +159,108 @@ internal static class Program
     }
 
     // ---------- helpers ----------
+    private enum RequestKind { Movie, Series, Unknown }
+
+    private static RequestKind GetKind(string? type)
+    {
+        var t = (type ?? "").Trim().ToUpperInvariant();
+        return t switch
+        {
+            "MOVIE" => RequestKind.Movie,
+            "TV" => RequestKind.Series,
+            "ANIME" => RequestKind.Series,
+            _ => RequestKind.Unknown
+        };
+    }
+
+    private static string GetIdKind(RequestKind kind)
+    {
+        return kind == RequestKind.Movie ? "TMDB"
+             : kind == RequestKind.Series ? "TVDB"
+             : "ID";
+    }
+
+    private static string GetMediaKind(RequestKind kind)
+    {
+        return kind == RequestKind.Movie ? "Movie"
+             : kind == RequestKind.Series ? "Series"
+             : "Request";
+    }
+
+    private static void HandleIdMismatch(GoogleSheetsClient sheets, int row, string mediaKind, string title, 
+        string typeUpper, string idKind, int idValue, string? canonicalTitle)
+    {
+        var msg = $"ID/title mismatch for '{title}'. {idKind} {idValue} is '{canonicalTitle ?? "NOT FOUND"}'";
+
+        sheets.WriteResult(row, msg);
+
+        WriteStatusFromAction(sheets, row, null, RequestAction.IdMismatch);
+        LogFromAction(row, mediaKind, title, typeUpper, idKind, idValue, msg, RequestAction.IdMismatch);
+    }
+
+
+    private static void WriteStatusFromAction(GoogleSheetsClient sheets, int row, string? explicitStatus, RequestAction action)
+    {
+        // If client explicitly returned a status, trust it.
+        if (!string.IsNullOrWhiteSpace(explicitStatus))
+        {
+            sheets.WriteStatus(row, explicitStatus);
+            return;
+        }
+
+        // Infer status from action
+        switch (action)
+        {
+            case RequestAction.Added:
+            case RequestAction.Updated:
+                sheets.WriteStatus(row, "IN_PROGRESS");
+                break;
+
+            case RequestAction.Completed:
+                sheets.WriteStatus(row, "DONE");
+                break;
+
+            case RequestAction.Stale:
+                sheets.WriteStatus(row, "STALE");
+                break;
+
+            case RequestAction.NeedsId:
+            case RequestAction.IdMismatch:
+                sheets.WriteStatus(row, "NEEDS_ID");
+                break;
+
+            case RequestAction.BadType:
+                // Intentionally do NOT write STATUS
+                // User fixes TYPE and row will be retried
+                break;
+
+            case RequestAction.None:
+            default:
+                // No-op
+                break;
+        }
+    }
+
+
+    private static void LogFromAction(int row, string mediaKind, string title, string typeUpper, 
+            string idKind, int? id, string result, RequestAction action)
+    {
+        var actionText = action switch
+        {
+            RequestAction.Added => "ADDED",
+            RequestAction.Updated => "UPDATED",
+            RequestAction.Completed => "DONE",
+            RequestAction.Stale => "STALE",
+            RequestAction.NeedsId => "NEEDS_ID",
+            RequestAction.IdMismatch => "ID_MISMATCH",
+            RequestAction.BadType => "BAD_TYPE",
+            _ => "NOOP"
+        };
+
+        LogRow(row, actionText, mediaKind, title, typeUpper, idKind, id, $"result='{result}'");
+    }
+
+
     private static string NormalizeTitle(string s)
     {
         s = (s ?? "").Trim().ToUpperInvariant();
