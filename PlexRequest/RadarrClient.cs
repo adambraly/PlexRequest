@@ -160,7 +160,6 @@ public sealed class RadarrClient
     private sealed class RadarrQualityProfile { [JsonPropertyName("id")] public int Id { get; set; } [JsonPropertyName("name")] public string? Name { get; set; } }
     private sealed class RadarrRelease { [JsonPropertyName("title")] public string? Title { get; set; } }
     private sealed class RadarrQueueResponse { [JsonPropertyName("records")] public List<RadarrQueueRecord>? Records { get; set; } }
-
     private sealed class RadarrQueueRecord
     {
         [JsonPropertyName("movieId")] public int? MovieId { get; set; }
