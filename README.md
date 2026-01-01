@@ -71,6 +71,9 @@ The STATUS column controls how requests are handled.
   The request is missing or has an invalid/mismatched ID.  
   PlexRequest will re-check this row on every run until corrected.
 
+- `IN_PROGRESS`  
+  The request is currently searching indexers or is currently downloading.
+
 ### Terminal States
 
 - `DONE`  
@@ -81,6 +84,9 @@ The STATUS column controls how requests are handled.
 
 - `SKIP`  
   The request is intentionally ignored (bad request, already owned, etc.).
+
+- `STALE`  
+  Requests that have been active for multiple days and are unable to be retrieved by indexers are marked as stale.
 
 Terminal states are never reprocessed.
 
