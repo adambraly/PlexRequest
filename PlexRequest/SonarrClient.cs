@@ -76,7 +76,7 @@ public sealed class SonarrClient
 
     private (string result, string? status, RequestAction action) DescribeProgress(SonarrSeries existing)
     {
-        var q = TryGetQueueForSeries(existing.Id); // you add/keep this if you already implemented queue
+        var q = TryGetQueueForSeries(existing.Id);
         if (q != null)
         {
             if (q.Size.HasValue && q.Size.Value > 0 && q.SizeLeft.HasValue)
@@ -184,7 +184,11 @@ public sealed class SonarrClient
         var added = PostJson<SonarrSeries>("api/v3/series", addReq);
         if (added == null) return ("Failed to add series (unknown error)", RequestAction.None);
 
-        PostJson<object>("api/v3/command", new SonarrCommandRequest { Name = "SeriesSearch", SeriesId = added.Id });
+        PostJson<object>("api/v3/command", new SonarrCommandRequest 
+        { 
+            Name = "SeriesSearch", 
+            SeriesId = added.Id 
+        });
 
         _existingSeries.Add(added);
         return ("Added to Sonarr + searching", RequestAction.Added);
