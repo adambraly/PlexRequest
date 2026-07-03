@@ -191,12 +191,13 @@ internal static class Program
                         }
 
                         // Drop seasons that already exist COMPLETE on a Plex server.
-                        // A season only counts if the server has at least as many
-                        // episodes as have aired — a half-transferred season must
-                        // still be downloaded, not skipped.
+                        // A season only counts if the server has every episode of the
+                        // season (unaired included) — so half-transferred seasons are
+                        // still downloaded, and still-airing seasons keep tracking in
+                        // Sonarr instead of freezing at ON_PLEX.
                         var foundOnPlex = new List<(string name, List<int> seasons)>();
-                        Dictionary<int, int>? airedCounts = null;
-                        var airedCountsLoaded = false;
+                        Dictionary<int, int>? seasonTotals = null;
+                        var seasonTotalsLoaded = false;
 
                         foreach (var (client, name) in plexServers)
                         {
@@ -205,16 +206,16 @@ internal static class Program
                             var serverCounts = client.GetShowSeasonCounts(r.Id.Value);
                             if (serverCounts.Count == 0) continue;
 
-                            if (!airedCountsLoaded)
+                            if (!seasonTotalsLoaded)
                             {
-                                airedCounts = sonarr.GetAiredEpisodeCountsIfKnown(r.Id.Value);
-                                airedCountsLoaded = true;
+                                seasonTotals = sonarr.GetSeasonEpisodeTotalsIfKnown(r.Id.Value);
+                                seasonTotalsLoaded = true;
                             }
 
                             var onThisServer = requestedSeasons.Where(s =>
                                 serverCounts.TryGetValue(s, out var have) && have > 0 &&
                                 // No Sonarr episode data → fall back to any-episodes-means-have-it
-                                (airedCounts == null || !airedCounts.TryGetValue(s, out var aired) || have >= aired)
+                                (seasonTotals == null || !seasonTotals.TryGetValue(s, out var total) || have >= total)
                             ).ToList();
                             if (onThisServer.Count == 0) continue;
 

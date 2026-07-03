@@ -90,19 +90,19 @@ public sealed class SonarrClient
     }
 
     /// <summary>
-    /// Aired episodes per season (specials excluded), used to judge whether a
-    /// season found on Plex is actually complete. Null when the series is not
-    /// in Sonarr (no episode data available) — callers should then fall back
-    /// to any-episodes-means-have-it.
+    /// Total episodes per season (specials excluded, unaired included), used to
+    /// judge whether a season found on Plex is truly complete. A still-airing
+    /// season never reaches its total, so it keeps tracking instead of going
+    /// ON_PLEX. Null when the series is not in Sonarr (no episode data) —
+    /// callers should then fall back to any-episodes-means-have-it.
     /// </summary>
-    public Dictionary<int, int>? GetAiredEpisodeCountsIfKnown(int tvdbId)
+    public Dictionary<int, int>? GetSeasonEpisodeTotalsIfKnown(int tvdbId)
     {
         var existing = _existingSeries.FirstOrDefault(s => s.TvdbId == tvdbId);
         if (existing == null) return null;
 
-        var now = DateTime.UtcNow;
         return GetEpisodes(existing.Id)
-            .Where(e => e.SeasonNumber > 0 && e.AirDateUtc.HasValue && e.AirDateUtc.Value <= now)
+            .Where(e => e.SeasonNumber > 0)
             .GroupBy(e => e.SeasonNumber)
             .ToDictionary(g => g.Key, g => g.Count());
     }

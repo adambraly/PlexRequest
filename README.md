@@ -159,9 +159,10 @@ Plex server at the start of each run and:
   season by season) — if **all** requested seasons are local, the row is
   marked `ON_PLEX`; if only some are, the remaining seasons are requested
   and RESULT notes what was skipped
-- A season only counts as "on Plex" when the server holds at least as many
-  episodes as have aired (per Sonarr) — a half-transferred, still-airing
-  season is downloaded rather than skipped. When the series is unknown to
+- A season only counts as "on Plex" when the server holds every episode of
+  the season (per Sonarr, unaired included) — half-transferred seasons are
+  downloaded rather than skipped, and still-airing seasons keep tracking as
+  IN_PROGRESS instead of freezing at ON_PLEX. When the series is unknown to
   Sonarr, any local episodes count as having the season.
 
 The check is read-only and fail-open: if Plex is unreachable, a warning is
