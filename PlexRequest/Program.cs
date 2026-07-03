@@ -190,18 +190,36 @@ internal static class Program
                             break;
                         }
 
-                        // Drop seasons that already exist on a Plex server
+                        // Drop seasons that already exist COMPLETE on a Plex server.
+                        // A season only counts if the server has at least as many
+                        // episodes as have aired — a half-transferred season must
+                        // still be downloaded, not skipped.
                         var foundOnPlex = new List<(string name, List<int> seasons)>();
+                        Dictionary<int, int>? airedCounts = null;
+                        var airedCountsLoaded = false;
+
                         foreach (var (client, name) in plexServers)
                         {
                             if (requestedSeasons.Count == 0) break;
 
-                            var serverSeasons = client.GetShowSeasons(r.Id.Value);
-                            var onThisServer = requestedSeasons.Where(serverSeasons.Contains).ToList();
+                            var serverCounts = client.GetShowSeasonCounts(r.Id.Value);
+                            if (serverCounts.Count == 0) continue;
+
+                            if (!airedCountsLoaded)
+                            {
+                                airedCounts = sonarr.GetAiredEpisodeCountsIfKnown(r.Id.Value);
+                                airedCountsLoaded = true;
+                            }
+
+                            var onThisServer = requestedSeasons.Where(s =>
+                                serverCounts.TryGetValue(s, out var have) && have > 0 &&
+                                // No Sonarr episode data → fall back to any-episodes-means-have-it
+                                (airedCounts == null || !airedCounts.TryGetValue(s, out var aired) || have >= aired)
+                            ).ToList();
                             if (onThisServer.Count == 0) continue;
 
                             foundOnPlex.Add((name, onThisServer));
-                            requestedSeasons = requestedSeasons.Where(s => !serverSeasons.Contains(s)).ToList();
+                            requestedSeasons = requestedSeasons.Where(s => !onThisServer.Contains(s)).ToList();
                         }
 
                         var plexNote = "";

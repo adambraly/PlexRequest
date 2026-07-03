@@ -22,7 +22,7 @@ public sealed class PlexClient
 
     private readonly HashSet<int> _movieTmdbIds = new();
     private readonly Dictionary<int, string> _showRatingKeyByTvdbId = new();
-    private readonly Dictionary<int, HashSet<int>> _showSeasonsCache = new();
+    private readonly Dictionary<int, Dictionary<int, int>> _showSeasonsCache = new();
 
     public bool IsAvailable { get; private set; }
 
@@ -90,25 +90,26 @@ public sealed class PlexClient
     public bool HasMovie(int tmdbId) => IsAvailable && _movieTmdbIds.Contains(tmdbId);
 
     /// <summary>
-    /// Season numbers (specials excluded) that exist locally with at least one episode.
-    /// Empty set when the show is not on the local server or Plex is unavailable.
+    /// Episode counts per season (specials excluded) that exist locally,
+    /// e.g. {1: 10, 4: 3} = all/some of S1 and 3 episodes of S4.
+    /// Empty when the show is not on this server or Plex is unavailable.
     /// </summary>
-    public HashSet<int> GetShowSeasons(int tvdbId)
+    public Dictionary<int, int> GetShowSeasonCounts(int tvdbId)
     {
         if (!IsAvailable || !_showRatingKeyByTvdbId.TryGetValue(tvdbId, out var ratingKey))
-            return new HashSet<int>();
+            return new Dictionary<int, int>();
 
         if (_showSeasonsCache.TryGetValue(tvdbId, out var cached))
             return cached;
 
-        var result = new HashSet<int>();
+        var result = new Dictionary<int, int>();
         try
         {
             var seasons = GetJson<PlexResponse<PlexItem>>($"library/metadata/{ratingKey}/children")?.MediaContainer?.Metadata ?? new();
             foreach (var s in seasons)
             {
                 if (s.Index.HasValue && s.Index.Value > 0 && (s.LeafCount ?? 0) > 0)
-                    result.Add(s.Index.Value);
+                    result[s.Index.Value] = s.LeafCount!.Value;
             }
         }
         catch (Exception ex)

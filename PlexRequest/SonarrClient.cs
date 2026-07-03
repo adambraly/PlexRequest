@@ -90,6 +90,24 @@ public sealed class SonarrClient
     }
 
     /// <summary>
+    /// Aired episodes per season (specials excluded), used to judge whether a
+    /// season found on Plex is actually complete. Null when the series is not
+    /// in Sonarr (no episode data available) — callers should then fall back
+    /// to any-episodes-means-have-it.
+    /// </summary>
+    public Dictionary<int, int>? GetAiredEpisodeCountsIfKnown(int tvdbId)
+    {
+        var existing = _existingSeries.FirstOrDefault(s => s.TvdbId == tvdbId);
+        if (existing == null) return null;
+
+        var now = DateTime.UtcNow;
+        return GetEpisodes(existing.Id)
+            .Where(e => e.SeasonNumber > 0 && e.AirDateUtc.HasValue && e.AirDateUtc.Value <= now)
+            .GroupBy(e => e.SeasonNumber)
+            .ToDictionary(g => g.Key, g => g.Count());
+    }
+
+    /// <summary>
     /// TV/Anime use TVDB IDs in Sonarr. We require TVDB ID in sheet column C for TV/ANIME rows.
     /// Only the requested seasons are monitored and searched; progress and DONE are
     /// judged against the requested seasons only.
@@ -439,6 +457,7 @@ public sealed class SonarrClient
         [JsonPropertyName("seasonNumber")] public int SeasonNumber { get; set; }
         [JsonPropertyName("episodeNumber")] public int EpisodeNumber { get; set; }
         [JsonPropertyName("hasFile")] public bool HasFile { get; set; }
+        [JsonPropertyName("airDateUtc")] public DateTime? AirDateUtc { get; set; }
     }
     private List<SonarrEpisode> GetEpisodes(int seriesId)
     {
