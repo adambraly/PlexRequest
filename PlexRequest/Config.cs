@@ -26,6 +26,11 @@ public sealed class Config
     public int ReleaseCheckMinutes { get; }
     public int StaleAfterDays { get; }
 
+    // Local Plex (optional — local library check is skipped when unset)
+    public string? PlexUrl { get; }
+    public string? PlexToken { get; }
+    public string? PlexProxy { get; }
+
 
     public Config()
     {
@@ -47,6 +52,10 @@ public sealed class Config
 
         ReleaseCheckMinutes = EnvInt("RELEASE_CHECK_MINUTES", 1440);
         StaleAfterDays = EnvInt("STALE_AFTER_DAYS", 30);
+
+        PlexUrl = Environment.GetEnvironmentVariable("PLEX_URL")?.TrimEnd('/');
+        PlexToken = Environment.GetEnvironmentVariable("PLEX_TOKEN");
+        PlexProxy = Environment.GetEnvironmentVariable("PLEX_PROXY");
     }
 
     private static string Env(string name)

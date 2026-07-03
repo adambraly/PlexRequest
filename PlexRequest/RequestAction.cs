@@ -9,5 +9,7 @@ public enum RequestAction
     Stale,
     NeedsId,
     IdMismatch,
+    NeedsSeason,
+    OnPlex,
     BadType
 }

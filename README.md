@@ -19,11 +19,13 @@ Users submit requests by filling out a Google Sheet. PlexRequest:
 - Reads requests from the sheet
 - Validates required IDs
 - Ensures the ID matches the requested title
+- Requires a season selection for TV/Anime requests
+- Optionally checks a local Plex server and refuses to re-download media already there
 - Adds the request to Sonarr or Radarr if appropriate
 - Writes progress and completion status back to the sheet
 - Ignores completed or intentionally skipped entries on future runs
 
-PlexRequest does not move files, manage Plex, or interact with local storage. It only manages requests on the seedbox.
+PlexRequest does not move files, manage Plex libraries, or interact with local storage. It only manages requests on the seedbox (plus an optional read-only check of a local Plex server).
 
 ---
 
@@ -36,11 +38,12 @@ The sheet must follow this column layout:
 | A | TITLE | Human-readable title (for users) |
 | B | TYPE | `TV`, `ANIME`, or `MOVIE` |
 | C | ID | Required ID (TVDB for TV/Anime, TMDB for Movie) |
-| D | RESULT | Output written by PlexRequest |
-| E | STATUS | Request lifecycle state |
+| D | SEASON | Required for TV/Anime (see below); ignored for movies |
+| E | RESULT | Output written by PlexRequest |
+| F | STATUS | Request lifecycle state |
 
 Example range:
-```Requests!A3:E``` <br/>
+```Requests!A3:F``` <br/>
 Row 1–2 are typically headers or instructions and are ignored.  
 
 ---
@@ -58,6 +61,28 @@ If the ID does not exist or does not match the title, the request will not be pr
 
 ---
 
+## SEASON Requirements (TV/Anime)
+
+TV and Anime requests must specify which season(s) to download in column D.
+This prevents accidentally grabbing an entire 23-season back catalog.
+
+Accepted values:
+
+- `3` or `S3` — a single season
+- `1,3` — a list of seasons
+- `2-5` — a range of seasons
+- `1,3-5` — combinations
+- `LATEST` — the most recent season
+- `ALL` — the entire series (explicit opt-in)
+
+If SEASON is blank or invalid, STATUS is set to `NEEDS_SEASON` and the row is
+re-checked every run until corrected. If a requested season does not exist
+(e.g. `S30` of a 23-season show), RESULT explains which seasons exist.
+
+Movies ignore the SEASON column.
+
+---
+
 ## STATUS Lifecycle
 
 The STATUS column controls how requests are handled.
@@ -69,6 +94,10 @@ The STATUS column controls how requests are handled.
 
 - `NEEDS_ID`  
   The request is missing or has an invalid/mismatched ID.  
+  PlexRequest will re-check this row on every run until corrected.
+
+- `NEEDS_SEASON`  
+  The TV/Anime request is missing or has an invalid SEASON value (column D).  
   PlexRequest will re-check this row on every run until corrected.
 
 - `IN_PROGRESS`  
@@ -88,6 +117,11 @@ The STATUS column controls how requests are handled.
 - `STALE`  
   Requests that have been active for multiple days and are unable to be retrieved by indexers are marked as stale.
 
+- `ON_PLEX`  
+  The requested media (or all requested seasons) already exists on the local
+  Plex server. Nothing is downloaded. Requires the optional Plex check to be
+  configured.
+
 Terminal states are never reprocessed.
 
 ---
@@ -98,8 +132,12 @@ Terminal states are never reprocessed.
 
 - Matches existing series by TVDB ID
 - Adds new series using the provided TVDB ID
-- Tracks progress by counting non-special episodes (`seasonNumber > 0`)
-- Marks `DONE` when all normal episodes have files
+- Monitors **only the requested seasons** and triggers a search per season
+  (`ALL` requests monitor and search the whole series)
+- For series already in Sonarr, newly requested seasons are switched to
+  monitored and searched — already-monitored seasons are left alone
+- Tracks progress by counting episodes in the requested seasons only
+- Marks `DONE` when all episodes in the requested seasons have files
 - Ignores specials entirely
 
 ### MOVIE (Radarr)
@@ -107,6 +145,27 @@ Terminal states are never reprocessed.
 - Matches existing movies by TMDB ID
 - Adds new movies using the provided TMDB ID
 - Marks `DONE` once the movie file exists
+
+---
+
+## Local Plex Check (Optional)
+
+If `PLEX_URL` and `PLEX_TOKEN` are set, PlexRequest queries the local (home)
+Plex server at the start of each run and:
+
+- Marks movie requests `ON_PLEX` when the movie already exists locally
+  (matched by TMDB ID)
+- Drops requested seasons that already exist locally (matched by TVDB ID,
+  season by season) — if **all** requested seasons are local, the row is
+  marked `ON_PLEX`; if only some are, the remaining seasons are requested
+  and RESULT notes what was skipped
+
+The check is read-only and fail-open: if Plex is unreachable, a warning is
+logged and the run proceeds without the check. The seedbox side is already
+covered — Sonarr/Radarr know what exists there.
+
+The seedbox must be able to reach the Plex server (public Plex port,
+VPN/Tailscale, etc.).
 
 ---
 
@@ -133,7 +192,7 @@ All configuration is done via environment variables.
 ```
 GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
 GOOGLE_SHEET_ID=...
-GOOGLE_SHEET_RANGE=Requests!A3:E
+GOOGLE_SHEET_RANGE=Requests!A3:F
 GOOGLE_SHEET_START_ROW=3
 ```
 
@@ -154,6 +213,14 @@ RADARR_ROOT_MOVIES=/path/to/Movies
 RADARR_QUALITY_PROFILE=HD - 720p/1080p
 ```
 
+### Local Plex (optional)
+
+```
+PLEX_URL=http://plex.example.com:32400
+PLEX_TOKEN=...
+```
+
+Leave unset to disable the local library check.
 
 These are typically sourced from a `.env` file when running under cron.
 
@@ -178,8 +245,7 @@ The tool makes no assumptions about timing or ordering.
 ## What PlexRequest Does Not Do
 
 - Move files off the seedbox
-- Check a local NAS or Plex library
-- Deduplicate against external storage
+- Deduplicate against external storage (beyond the optional read-only Plex check)
 - Manage Plex metadata
 - Provide a UI beyond the Google Sheet
 

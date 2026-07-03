@@ -4,7 +4,7 @@ using PlexRequest;
 
 internal static class Program
 {
-    // Sheet: A TITLE, B TYPE, C ID (required), D RESULT, E STATUS
+    // Sheet: A TITLE, B TYPE, C ID (required), D SEASON (TV/ANIME), E RESULT, F STATUS
     //   TV/ANIME => ID is TVDB
     //   MOVIE    => ID is TMDB
     private static void Main()
@@ -13,6 +13,14 @@ internal static class Program
         Log("PlexRequest run started");
 
         var cfg = new Config();
+
+        var endColMatch = System.Text.RegularExpressions.Regex.Match(cfg.GoogleSheetRange.Trim(), @":([A-Za-z]+)\d*$");
+        if (endColMatch.Success)
+        {
+            var endCol = endColMatch.Groups[1].Value.ToUpperInvariant();
+            if (endCol.Length == 1 && endCol[0] < 'F')
+                Log($"Warning: GOOGLE_SHEET_RANGE ends at column {endCol} — update it to include column F (e.g. Requests!A3:F) for the SEASON layout");
+        }
 
         var sheets = new GoogleSheetsClient(cfg.GoogleSheetId, cfg.SheetTabName);
 
@@ -33,6 +41,15 @@ internal static class Program
         sonarr.Initialize();
         radarr.Initialize();
 
+        // Optional local Plex check — disabled when PLEX_URL/PLEX_TOKEN unset or Plex is unreachable
+        PlexClient? plex = null;
+        if (!string.IsNullOrWhiteSpace(cfg.PlexUrl) && !string.IsNullOrWhiteSpace(cfg.PlexToken))
+        {
+            plex = new PlexClient(cfg.PlexUrl, cfg.PlexToken, cfg.PlexProxy);
+            plex.Initialize();
+            if (!plex.IsAvailable) plex = null;
+        }
+
         var rows = sheets.ReadRows(cfg.GoogleSheetRange, cfg.SheetStartRow);
         Log($"Read {rows.Count} row(s) from {cfg.GoogleSheetRange}");
 
@@ -51,13 +68,15 @@ internal static class Program
                 string.IsNullOrWhiteSpace(status) ||
                 statusUpper == "NEW" ||
                 statusUpper == "NEEDS_ID" ||
+                statusUpper == "NEEDS_SEASON" ||
                 statusUpper == "IN_PROGRESS";
 
             bool isIgnored =
                 statusUpper == "DONE" ||
                 statusUpper == "TRANSFERRED" ||
                 statusUpper == "SKIP" ||
-                statusUpper == "STALE";
+                statusUpper == "STALE" ||
+                statusUpper == "ON_PLEX";
 
             if (!isProcessable || isIgnored)
                 continue;
@@ -104,8 +123,18 @@ internal static class Program
                         var canonMovieTitle = radarr.GetCanonicalTitleByTmdbId(r.Id.Value);
                         if (string.IsNullOrWhiteSpace(canonMovieTitle) || !TitlesMatch(r.Title, canonMovieTitle))
                         {
-                            HandleIdMismatch(sheets, r.SheetRowNumber, mediaKind, r.Title, 
+                            HandleIdMismatch(sheets, r.SheetRowNumber, mediaKind, r.Title,
                                 typeUpper, idKind,r.Id.Value, canonMovieTitle);
+
+                            processed++;
+                            break;
+                        }
+
+                        // Already on the local Plex server — never re-download
+                        if (plex != null && plex.HasMovie(r.Id.Value))
+                        {
+                            WriteRowOutcome(sheets, r, mediaKind, typeUpper, idKind,
+                                "Already on local Plex", RequestAction.OnPlex);
 
                             processed++;
                             break;
@@ -115,7 +144,7 @@ internal static class Program
 
                         sheets.WriteResult(r.SheetRowNumber, result);
                         WriteStatusFromAction(sheets, r.SheetRowNumber, newStatus, action);
-                        
+
                         LogFromAction(r.SheetRowNumber, mediaKind, r.Title, typeUpper, idKind, r.Id.Value, result, action);
                         processed++;
                         break;
@@ -134,8 +163,58 @@ internal static class Program
                             break;
                         }
 
-                        var (result, newStatus, action) = sonarr.ProcessSeriesByTvdbId(r.Id.Value, r.Title, typeUpper);
-                        
+                        // SEASON (column D) is required for TV/ANIME
+                        if (!SeasonSpec.TryParse(r.SeasonRaw, out var spec, out var specError))
+                        {
+                            WriteRowOutcome(sheets, r, mediaKind, typeUpper, idKind, specError, RequestAction.NeedsSeason);
+                            processed++;
+                            break;
+                        }
+
+                        var (knownSeasons, seasonsError) = sonarr.GetKnownSeasons(r.Id.Value);
+                        List<int>? requestedSeasons = null;
+                        var resolveError = seasonsError;
+                        if (resolveError == null)
+                            (requestedSeasons, resolveError) = spec.Resolve(knownSeasons);
+
+                        if (resolveError != null || requestedSeasons == null)
+                        {
+                            WriteRowOutcome(sheets, r, mediaKind, typeUpper, idKind,
+                                resolveError ?? "Could not resolve seasons", RequestAction.NeedsSeason);
+
+                            processed++;
+                            break;
+                        }
+
+                        // Drop seasons that already exist on the local Plex server
+                        var plexNote = "";
+                        if (plex != null)
+                        {
+                            var localSeasons = plex.GetShowSeasons(r.Id.Value);
+                            var onPlex = requestedSeasons.Where(localSeasons.Contains).ToList();
+                            if (onPlex.Count > 0)
+                            {
+                                requestedSeasons = requestedSeasons.Where(s => !localSeasons.Contains(s)).ToList();
+
+                                if (requestedSeasons.Count == 0)
+                                {
+                                    WriteRowOutcome(sheets, r, mediaKind, typeUpper, idKind,
+                                        $"Already on local Plex ({SeasonSpec.Format(onPlex)})", RequestAction.OnPlex);
+
+                                    processed++;
+                                    break;
+                                }
+
+                                plexNote = $"{SeasonSpec.Format(onPlex)} on local Plex; ";
+                            }
+                        }
+
+                        var coversAllSeasons = requestedSeasons.Count == knownSeasons.Count;
+                        var (result, newStatus, action) = sonarr.ProcessSeriesByTvdbId(
+                            r.Id.Value, r.Title, typeUpper, requestedSeasons, coversAllSeasons);
+
+                        result = plexNote + result;
+
                         sheets.WriteResult(r.SheetRowNumber, result);
                         WriteStatusFromAction(sheets, r.SheetRowNumber, newStatus, action);
 
@@ -199,6 +278,14 @@ internal static class Program
     }
 
 
+    private static void WriteRowOutcome(GoogleSheetsClient sheets, SheetRow r, string mediaKind,
+        string typeUpper, string idKind, string result, RequestAction action)
+    {
+        sheets.WriteResult(r.SheetRowNumber, result);
+        WriteStatusFromAction(sheets, r.SheetRowNumber, null, action);
+        LogFromAction(r.SheetRowNumber, mediaKind, r.Title, typeUpper, idKind, r.Id, result, action);
+    }
+
     private static void WriteStatusFromAction(GoogleSheetsClient sheets, int row, string? explicitStatus, RequestAction action)
     {
         // If client explicitly returned a status, trust it.
@@ -229,6 +316,14 @@ internal static class Program
                 sheets.WriteStatus(row, "NEEDS_ID");
                 break;
 
+            case RequestAction.NeedsSeason:
+                sheets.WriteStatus(row, "NEEDS_SEASON");
+                break;
+
+            case RequestAction.OnPlex:
+                sheets.WriteStatus(row, "ON_PLEX");
+                break;
+
             case RequestAction.BadType:
                 // Intentionally do NOT write STATUS
                 // User fixes TYPE and row will be retried
@@ -253,6 +348,8 @@ internal static class Program
             RequestAction.Stale => "STALE",
             RequestAction.NeedsId => "NEEDS_ID",
             RequestAction.IdMismatch => "ID_MISMATCH",
+            RequestAction.NeedsSeason => "NEEDS_SEASON",
+            RequestAction.OnPlex => "ON_PLEX",
             RequestAction.BadType => "BAD_TYPE",
             _ => "NOOP"
         };

@@ -27,7 +27,7 @@ public sealed class GoogleSheetsClient
         });
     }
 
-    // Layout: A title, B type, C id, D result, E status
+    // Layout: A title, B type, C id, D season, E result, F status
     public List<SheetRow> ReadRows(string a1Range, int startRow)
     {
         var resp = _sheets.Spreadsheets.Values.Get(_sheetId, a1Range).Execute();
@@ -44,6 +44,7 @@ public sealed class GoogleSheetsClient
             var title = GetCell(row, 0);
             var type = GetCell(row, 1);
             var idRaw = GetCell(row, 2);
+            var seasonRaw = GetCell(row, 3);
 
             int? id = null;
             if (int.TryParse(idRaw, out var parsed) && parsed > 0)
@@ -55,6 +56,7 @@ public sealed class GoogleSheetsClient
                 Type = type,
                 IdRaw = idRaw,
                 Id = id,
+                SeasonRaw = seasonRaw,
                 SheetRowNumber = rowNum
             });
 
@@ -66,8 +68,8 @@ public sealed class GoogleSheetsClient
 
     public string ReadStatusCell(int rowNumber)
     {
-        // STATUS is column E
-        var range = $"{_tabName}!E{rowNumber}";
+        // STATUS is column F
+        var range = $"{_tabName}!F{rowNumber}";
         var resp = _sheets.Spreadsheets.Values.Get(_sheetId, range).Execute();
         if (resp.Values == null || resp.Values.Count == 0) return "";
         if (resp.Values[0].Count == 0) return "";
@@ -75,10 +77,10 @@ public sealed class GoogleSheetsClient
     }
 
     public void WriteResult(int rowNumber, string value)
-        => WriteCell($"{_tabName}!D{rowNumber}", value); // RESULT is column D
+        => WriteCell($"{_tabName}!E{rowNumber}", value); // RESULT is column E
 
     public void WriteStatus(int rowNumber, string value)
-        => WriteCell($"{_tabName}!E{rowNumber}", value); // STATUS is column E
+        => WriteCell($"{_tabName}!F{rowNumber}", value); // STATUS is column F
 
     private void WriteCell(string a1Range, string value)
     {

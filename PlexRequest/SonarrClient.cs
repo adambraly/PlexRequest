@@ -4,6 +4,7 @@ using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 
 namespace PlexRequest;
@@ -55,17 +56,63 @@ public sealed class SonarrClient
     }
 
     /// <summary>
-    /// TV/Anime use TVDB IDs in Sonarr. We require TVDB ID in sheet column C for TV/ANIME rows.
+    /// Seasons (specials excluded) known for this TVDB ID, from the existing
+    /// Sonarr series if present, otherwise from a Sonarr lookup.
     /// </summary>
-    public (string result, string? status, RequestAction action) ProcessSeriesByTvdbId(int tvdbId, string titleForDisplay, string typeUpper)
+    public (List<int> seasons, string? error) GetKnownSeasons(int tvdbId)
+    {
+        var existing = _existingSeries.FirstOrDefault(s => s.TvdbId == tvdbId);
+
+        List<int> nums;
+        if (existing?.Seasons != null && existing.Seasons.Count > 0)
+        {
+            nums = existing.Seasons
+                .Where(s => s.SeasonNumber > 0)
+                .Select(s => s.SeasonNumber)
+                .OrderBy(n => n)
+                .ToList();
+        }
+        else
+        {
+            var term = Uri.EscapeDataString($"tvdb:{tvdbId}");
+            var list = GetJson<List<SonarrLookupSeries>>($"api/v3/series/lookup?term={term}");
+            nums = list?.FirstOrDefault()?.Seasons?
+                .Where(s => s.SeasonNumber > 0)
+                .Select(s => s.SeasonNumber)
+                .OrderBy(n => n)
+                .ToList() ?? new List<int>();
+        }
+
+        if (nums.Count == 0)
+            return (nums, $"No seasons found for TVDB {tvdbId}");
+
+        return (nums, null);
+    }
+
+    /// <summary>
+    /// TV/Anime use TVDB IDs in Sonarr. We require TVDB ID in sheet column C for TV/ANIME rows.
+    /// Only the requested seasons are monitored and searched; progress and DONE are
+    /// judged against the requested seasons only.
+    /// </summary>
+    public (string result, string? status, RequestAction action) ProcessSeriesByTvdbId(
+        int tvdbId, string titleForDisplay, string typeUpper, List<int> requestedSeasons, bool coversAllSeasons)
     {
         var existing = _existingSeries.FirstOrDefault(s => s.TvdbId == tvdbId);
         if (existing != null)
         {
-            return DescribeProgress(existing);
+            var newlyMonitored = EnsureSeasonsMonitored(existing.Id, requestedSeasons);
+            if (newlyMonitored.Count > 0)
+            {
+                foreach (var season in newlyMonitored)
+                    SeasonSearch(existing.Id, season);
+
+                return ($"Monitoring {SeasonSpec.Format(newlyMonitored)} + searching", null, RequestAction.Added);
+            }
+
+            return DescribeProgress(existing, requestedSeasons, coversAllSeasons);
         }
 
-        var (addedResult, addedAction) = AddAndSearch(titleForDisplay, typeUpper, tvdbId);
+        var (addedResult, addedAction) = AddAndSearch(titleForDisplay, typeUpper, tvdbId, requestedSeasons, coversAllSeasons);
 
         if (addedAction == RequestAction.None)
             return (addedResult, null, RequestAction.None);
@@ -74,7 +121,8 @@ public sealed class SonarrClient
     }
 
 
-    private (string result, string? status, RequestAction action) DescribeProgress(SonarrSeries existing)
+    private (string result, string? status, RequestAction action) DescribeProgress(
+        SonarrSeries existing, List<int> requestedSeasons, bool coversAllSeasons)
     {
         var q = TryGetQueueForSeries(existing.Id);
         if (q != null)
@@ -92,6 +140,10 @@ public sealed class SonarrClient
             var qStatus = q.Status ?? q.TrackedDownloadState ?? "Downloading";
             return ($"{qStatus} (Sonarr queue)", null, RequestAction.Updated);
         }
+
+        // Specific seasons requested: judge progress against those seasons only
+        if (!coversAllSeasons)
+            return DescribeSeasonProgress(existing, requestedSeasons);
 
         // FAST PATH: use series statistics if available (no /episode call)
         var stats = existing.Statistics;
@@ -164,7 +216,97 @@ public sealed class SonarrClient
 
 
 
-    private (string result, RequestAction action) AddAndSearch(string title, string typeUpper, int tvdbId)
+    private (string result, string? status, RequestAction action) DescribeSeasonProgress(SonarrSeries existing, List<int> requestedSeasons)
+    {
+        var episodes = GetEpisodes(existing.Id)
+            .Where(e => requestedSeasons.Contains(e.SeasonNumber))
+            .ToList();
+
+        if (episodes.Count == 0)
+            return ($"Waiting for Sonarr to load {SeasonSpec.Format(requestedSeasons)} metadata", null, RequestAction.Updated);
+
+        var have = episodes.Count(e => e.HasFile);
+        var total = episodes.Count;
+        var pct = have * 100.0 / total;
+        var label = SeasonSpec.Format(requestedSeasons);
+
+        if (have >= total)
+            return ($"Complete in Sonarr ({label})", "DONE", RequestAction.Completed);
+
+        if (existing.NextAiring != null)
+        {
+            var local = existing.NextAiring.Value.ToLocalTime();
+            return ($"In progress ({label}: {have}/{total}, {pct:0.0}%) — Next episode airs {local:MMM d, yyyy}", null, RequestAction.Updated);
+        }
+
+        var (msg, stale) = MaybeNoReleasesMessage(existing.Id);
+        if (!string.IsNullOrWhiteSpace(msg))
+        {
+            if (stale)
+                return (msg, "STALE", RequestAction.Stale);
+
+            return ($"In progress ({label}: {have}/{total}, {pct:0.0}%) — {msg}", null, RequestAction.Updated);
+        }
+
+        return ($"In progress ({label}: {have}/{total}, {pct:0.0}%) — No active download", null, RequestAction.Updated);
+    }
+
+    /// <summary>
+    /// Ensures the series and the requested seasons are monitored.
+    /// Returns the seasons that were newly switched to monitored.
+    /// </summary>
+    private List<int> EnsureSeasonsMonitored(int seriesId, List<int> seasons)
+    {
+        var newlyMonitored = new List<int>();
+
+        var series = GetJson<JsonNode>($"api/v3/series/{seriesId}");
+        if (series == null) return newlyMonitored;
+
+        var changed = false;
+
+        if (series["monitored"]?.GetValue<bool>() == false)
+        {
+            series["monitored"] = true;
+            changed = true;
+        }
+
+        var seasonNodes = series["seasons"]?.AsArray();
+        if (seasonNodes != null)
+        {
+            foreach (var node in seasonNodes)
+            {
+                if (node == null) continue;
+
+                var num = node["seasonNumber"]?.GetValue<int>() ?? -1;
+                if (!seasons.Contains(num)) continue;
+
+                if (node["monitored"]?.GetValue<bool>() != true)
+                {
+                    node["monitored"] = true;
+                    newlyMonitored.Add(num);
+                    changed = true;
+                }
+            }
+        }
+
+        if (changed && !PutJson($"api/v3/series/{seriesId}", series))
+            return new List<int>(); // update failed; don't claim we monitored anything
+
+        return newlyMonitored;
+    }
+
+    private void SeasonSearch(int seriesId, int seasonNumber)
+    {
+        PostJson<object>("api/v3/command", new SonarrCommandRequest
+        {
+            Name = "SeasonSearch",
+            SeriesId = seriesId,
+            SeasonNumber = seasonNumber
+        });
+    }
+
+    private (string result, RequestAction action) AddAndSearch(
+        string title, string typeUpper, int tvdbId, List<int> requestedSeasons, bool coversAllSeasons)
     {
         var chosenRoot = (typeUpper == "ANIME") ? _rootAnime : _rootTv;
         var seriesType = (typeUpper == "ANIME") ? "anime" : "standard";
@@ -178,20 +320,41 @@ public sealed class SonarrClient
             SeriesType = seriesType,
             Monitored = true,
             SeasonFolder = true,
-            AddOptions = new SonarrAddOptions { SearchForMissingEpisodes = true }
+            AddOptions = coversAllSeasons
+                ? new SonarrAddOptions { SearchForMissingEpisodes = true }
+                // Start with nothing monitored; the requested seasons are switched on below
+                : new SonarrAddOptions { SearchForMissingEpisodes = false, Monitor = "none" }
         };
 
         var added = PostJson<SonarrSeries>("api/v3/series", addReq);
         if (added == null) return ("Failed to add series (unknown error)", RequestAction.None);
 
-        PostJson<object>("api/v3/command", new SonarrCommandRequest 
-        { 
-            Name = "SeriesSearch", 
-            SeriesId = added.Id 
-        });
-
         _existingSeries.Add(added);
-        return ("Added to Sonarr + searching", RequestAction.Added);
+
+        if (coversAllSeasons)
+        {
+            PostJson<object>("api/v3/command", new SonarrCommandRequest
+            {
+                Name = "SeriesSearch",
+                SeriesId = added.Id
+            });
+
+            return ("Added to Sonarr + searching", RequestAction.Added);
+        }
+
+        // May come back short if the PUT failed or Sonarr hasn't populated seasons yet;
+        // the row stays IN_PROGRESS, so the existing-series path retries next run.
+        var monitored = EnsureSeasonsMonitored(added.Id, requestedSeasons);
+        foreach (var season in monitored)
+            SeasonSearch(added.Id, season);
+
+        if (monitored.Count == 0)
+            return ("Added to Sonarr — season monitoring pending, retrying next run", RequestAction.Added);
+
+        if (monitored.Count < requestedSeasons.Count)
+            return ($"Added to Sonarr, monitoring {SeasonSpec.Format(monitored)} + searching (remaining seasons retry next run)", RequestAction.Added);
+
+        return ($"Added to Sonarr, monitoring {SeasonSpec.Format(requestedSeasons)} + searching", RequestAction.Added);
     }
 
     public string? GetCanonicalTitleByTvdbId(int tvdbId)
@@ -286,6 +449,13 @@ public sealed class SonarrClient
     {
         [JsonPropertyName("title")] public string? Title { get; set; }
         [JsonPropertyName("tvdbId")] public int? TvdbId { get; set; }
+        [JsonPropertyName("seasons")] public List<SonarrSeasonInfo>? Seasons { get; set; }
+    }
+
+    public sealed class SonarrSeasonInfo
+    {
+        [JsonPropertyName("seasonNumber")] public int SeasonNumber { get; set; }
+        [JsonPropertyName("monitored")] public bool Monitored { get; set; }
     }
 
     public sealed class SonarrSeriesStatistics
@@ -302,9 +472,16 @@ public sealed class SonarrClient
         [JsonPropertyName("tvdbId")] public int? TvdbId { get; set; }
         [JsonPropertyName("statistics")] public SonarrSeriesStatistics? Statistics { get; set; }
         [JsonPropertyName("nextAiring")] public DateTime? NextAiring { get; set; }
+        [JsonPropertyName("seasons")] public List<SonarrSeasonInfo>? Seasons { get; set; }
     }
 
-    private sealed class SonarrAddOptions { [JsonPropertyName("searchForMissingEpisodes")] public bool SearchForMissingEpisodes { get; set; } = true; }
+    private sealed class SonarrAddOptions
+    {
+        [JsonPropertyName("searchForMissingEpisodes")] public bool SearchForMissingEpisodes { get; set; } = true;
+        [JsonPropertyName("monitor")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? Monitor { get; set; }
+    }
     private sealed class SonarrAddSeriesRequest
     {
         [JsonPropertyName("title")] public string? Title { get; set; }
@@ -317,7 +494,14 @@ public sealed class SonarrClient
         [JsonPropertyName("addOptions")] public SonarrAddOptions AddOptions { get; set; } = new();
     }
 
-    private sealed class SonarrCommandRequest { [JsonPropertyName("name")] public string? Name { get; set; } [JsonPropertyName("seriesId")] public int? SeriesId { get; set; } }
+    private sealed class SonarrCommandRequest
+    {
+        [JsonPropertyName("name")] public string? Name { get; set; }
+        [JsonPropertyName("seriesId")] public int? SeriesId { get; set; }
+        [JsonPropertyName("seasonNumber")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public int? SeasonNumber { get; set; }
+    }
 
     // ---------- helpers ----------
     private int GetCachedSpecialsCount(int seriesId)
@@ -410,6 +594,26 @@ public sealed class SonarrClient
         {
             Console.WriteLine($"HTTP POST failed: {path} :: {ex.Message}");
             return default;
+        }
+    }
+
+    private bool PutJson(string path, object body)
+    {
+        try
+        {
+            var resp = _http.PutAsJsonAsync(path, body).GetAwaiter().GetResult();
+            if (!resp.IsSuccessStatusCode)
+            {
+                var txt = resp.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+                Console.WriteLine($"HTTP PUT failed: {path} :: {(int)resp.StatusCode} {resp.ReasonPhrase} :: {txt}");
+                return false;
+            }
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"HTTP PUT failed: {path} :: {ex.Message}");
+            return false;
         }
     }
 }
