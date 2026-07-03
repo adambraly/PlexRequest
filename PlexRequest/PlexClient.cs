@@ -18,6 +18,7 @@ namespace PlexRequest;
 public sealed class PlexClient
 {
     private readonly HttpClient _http;
+    private readonly string _name;
 
     private readonly HashSet<int> _movieTmdbIds = new();
     private readonly Dictionary<int, string> _showRatingKeyByTvdbId = new();
@@ -25,8 +26,10 @@ public sealed class PlexClient
 
     public bool IsAvailable { get; private set; }
 
-    public PlexClient(string baseUrl, string token, string? proxyUrl = null)
+    public PlexClient(string baseUrl, string token, string? proxyUrl = null, string name = "Plex")
     {
+        _name = name;
+
         // proxyUrl routes only Plex traffic (e.g. through a Tailscale userspace
         // HTTP proxy) without affecting Sonarr/Radarr/Sheets clients.
         HttpMessageHandler handler = new HttpClientHandler
@@ -75,12 +78,12 @@ public sealed class PlexClient
             }
 
             IsAvailable = true;
-            Console.WriteLine($"Plex library loaded: {_movieTmdbIds.Count} movie(s), {_showRatingKeyByTvdbId.Count} show(s)");
+            Console.WriteLine($"Plex library loaded ({_name}): {_movieTmdbIds.Count} movie(s), {_showRatingKeyByTvdbId.Count} show(s)");
         }
         catch (Exception ex)
         {
             IsAvailable = false;
-            Console.WriteLine($"Plex unreachable — local library check disabled this run :: {ex.Message}");
+            Console.WriteLine($"Plex unreachable ({_name}) — this server's library check disabled this run :: {ex.Message}");
         }
     }
 

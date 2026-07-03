@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Linq;
 using PlexRequest;
 
@@ -41,13 +42,15 @@ internal static class Program
         sonarr.Initialize();
         radarr.Initialize();
 
-        // Optional local Plex check — disabled when PLEX_URL/PLEX_TOKEN unset or Plex is unreachable
-        PlexClient? plex = null;
-        if (!string.IsNullOrWhiteSpace(cfg.PlexUrl) && !string.IsNullOrWhiteSpace(cfg.PlexToken))
+        // Optional Plex checks — each server that is configured and reachable
+        // is consulted before downloading (home server first, then seedbox Plex)
+        var plexServers = new List<(PlexClient client, string name)>();
+        foreach (var ps in cfg.PlexServers)
         {
-            plex = new PlexClient(cfg.PlexUrl, cfg.PlexToken, cfg.PlexProxy);
-            plex.Initialize();
-            if (!plex.IsAvailable) plex = null;
+            var client = new PlexClient(ps.Url, ps.Token, ps.Proxy, ps.Name);
+            client.Initialize();
+            if (client.IsAvailable)
+                plexServers.Add((client, ps.Name));
         }
 
         var rows = sheets.ReadRows(cfg.GoogleSheetRange, cfg.SheetStartRow);
@@ -130,11 +133,12 @@ internal static class Program
                             break;
                         }
 
-                        // Already on the local Plex server — never re-download
-                        if (plex != null && plex.HasMovie(r.Id.Value))
+                        // Already on a Plex server — never re-download
+                        var movieHit = plexServers.FirstOrDefault(p => p.client.HasMovie(r.Id.Value));
+                        if (movieHit.client != null)
                         {
                             WriteRowOutcome(sheets, r, mediaKind, typeUpper, idKind,
-                                $"Already on {cfg.PlexName}", RequestAction.OnPlex);
+                                $"Already on {movieHit.name}", RequestAction.OnPlex);
 
                             processed++;
                             break;
@@ -186,27 +190,36 @@ internal static class Program
                             break;
                         }
 
-                        // Drop seasons that already exist on the local Plex server
-                        var plexNote = "";
-                        if (plex != null)
+                        // Drop seasons that already exist on a Plex server
+                        var foundOnPlex = new List<(string name, List<int> seasons)>();
+                        foreach (var (client, name) in plexServers)
                         {
-                            var localSeasons = plex.GetShowSeasons(r.Id.Value);
-                            var onPlex = requestedSeasons.Where(localSeasons.Contains).ToList();
-                            if (onPlex.Count > 0)
+                            if (requestedSeasons.Count == 0) break;
+
+                            var serverSeasons = client.GetShowSeasons(r.Id.Value);
+                            var onThisServer = requestedSeasons.Where(serverSeasons.Contains).ToList();
+                            if (onThisServer.Count == 0) continue;
+
+                            foundOnPlex.Add((name, onThisServer));
+                            requestedSeasons = requestedSeasons.Where(s => !serverSeasons.Contains(s)).ToList();
+                        }
+
+                        var plexNote = "";
+                        if (foundOnPlex.Count > 0)
+                        {
+                            if (requestedSeasons.Count == 0)
                             {
-                                requestedSeasons = requestedSeasons.Where(s => !localSeasons.Contains(s)).ToList();
+                                var msg = foundOnPlex.Count == 1
+                                    ? $"Already on {foundOnPlex[0].name} ({SeasonSpec.Format(foundOnPlex[0].seasons)})"
+                                    : "Already on Plex: " + string.Join(", ", foundOnPlex.Select(f => $"{SeasonSpec.Format(f.seasons)} on {f.name}"));
 
-                                if (requestedSeasons.Count == 0)
-                                {
-                                    WriteRowOutcome(sheets, r, mediaKind, typeUpper, idKind,
-                                        $"Already on {cfg.PlexName} ({SeasonSpec.Format(onPlex)})", RequestAction.OnPlex);
+                                WriteRowOutcome(sheets, r, mediaKind, typeUpper, idKind, msg, RequestAction.OnPlex);
 
-                                    processed++;
-                                    break;
-                                }
-
-                                plexNote = $"{SeasonSpec.Format(onPlex)} on {cfg.PlexName}; ";
+                                processed++;
+                                break;
                             }
+
+                            plexNote = string.Join("; ", foundOnPlex.Select(f => $"{SeasonSpec.Format(f.seasons)} on {f.name}")) + "; ";
                         }
 
                         var coversAllSeasons = requestedSeasons.Count == knownSeasons.Count;

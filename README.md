@@ -220,13 +220,23 @@ PLEX_URL=http://plex.example.com:32400
 PLEX_TOKEN=...
 PLEX_PROXY=http://localhost:1055
 PLEX_NAME=DS1019
+
+PLEX2_URL=http://localhost:24158
+PLEX2_TOKEN=...
+PLEX2_PROXY=...
+PLEX2_NAME=Seedbox
 ```
 
-Leave `PLEX_URL`/`PLEX_TOKEN` unset to disable the local library check.
-`PLEX_PROXY` (optional) routes only Plex traffic through an HTTP proxy —
-useful when reaching home over a Tailscale userspace proxy. `PLEX_NAME`
-(optional) is the server name used in RESULT messages, e.g.
-"Already on DS1019 (S1-S8)"; defaults to "local Plex".
+Leave `PLEX_URL`/`PLEX_TOKEN` unset to disable the library check entirely.
+Servers are checked in order (PLEX first, then PLEX2). `PLEX2_*` is an
+optional second server — e.g. the seedbox's own Plex, which catches files
+on the seedbox that Sonarr/Radarr no longer track. `PLEX2_TOKEN` defaults
+to `PLEX_TOKEN` (an account token works on every server you own).
+
+`*_PROXY` (optional) routes only that server's traffic through an HTTP
+proxy — useful when reaching home over a Tailscale userspace proxy.
+`*_NAME` (optional) is the server name used in RESULT messages, e.g.
+"Already on DS1019 (S1-S8)"; defaults to "local Plex" / "seedbox Plex".
 
 These are typically sourced from a `.env` file when running under cron.
 

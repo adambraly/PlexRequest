@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 
 namespace PlexRequest;
 
@@ -26,11 +27,18 @@ public sealed class Config
     public int ReleaseCheckMinutes { get; }
     public int StaleAfterDays { get; }
 
-    // Local Plex (optional — local library check is skipped when unset)
-    public string? PlexUrl { get; }
-    public string? PlexToken { get; }
-    public string? PlexProxy { get; }
-    public string PlexName { get; }
+    // Plex servers to check for already-owned media (optional — check is
+    // skipped when none configured). PLEX_* is the primary (home) server,
+    // PLEX2_* an optional second (e.g. the seedbox's own Plex).
+    public sealed class PlexServerConfig
+    {
+        public string Url { get; init; } = "";
+        public string Token { get; init; } = "";
+        public string? Proxy { get; init; }
+        public string Name { get; init; } = "";
+    }
+
+    public IReadOnlyList<PlexServerConfig> PlexServers { get; }
 
 
     public Config()
@@ -54,10 +62,35 @@ public sealed class Config
         ReleaseCheckMinutes = EnvInt("RELEASE_CHECK_MINUTES", 1440);
         StaleAfterDays = EnvInt("STALE_AFTER_DAYS", 30);
 
-        PlexUrl = Environment.GetEnvironmentVariable("PLEX_URL")?.TrimEnd('/');
-        PlexToken = Environment.GetEnvironmentVariable("PLEX_TOKEN");
-        PlexProxy = Environment.GetEnvironmentVariable("PLEX_PROXY");
-        PlexName = Environment.GetEnvironmentVariable("PLEX_NAME") ?? "local Plex";
+        var plexServers = new List<PlexServerConfig>();
+
+        var plexUrl = Environment.GetEnvironmentVariable("PLEX_URL")?.TrimEnd('/');
+        var plexToken = Environment.GetEnvironmentVariable("PLEX_TOKEN");
+        if (!string.IsNullOrWhiteSpace(plexUrl) && !string.IsNullOrWhiteSpace(plexToken))
+        {
+            plexServers.Add(new PlexServerConfig
+            {
+                Url = plexUrl!,
+                Token = plexToken!,
+                Proxy = Environment.GetEnvironmentVariable("PLEX_PROXY"),
+                Name = Environment.GetEnvironmentVariable("PLEX_NAME") ?? "local Plex"
+            });
+        }
+
+        var plex2Url = Environment.GetEnvironmentVariable("PLEX2_URL")?.TrimEnd('/');
+        var plex2Token = Environment.GetEnvironmentVariable("PLEX2_TOKEN") ?? plexToken; // account token works on all owned servers
+        if (!string.IsNullOrWhiteSpace(plex2Url) && !string.IsNullOrWhiteSpace(plex2Token))
+        {
+            plexServers.Add(new PlexServerConfig
+            {
+                Url = plex2Url!,
+                Token = plex2Token!,
+                Proxy = Environment.GetEnvironmentVariable("PLEX2_PROXY"),
+                Name = Environment.GetEnvironmentVariable("PLEX2_NAME") ?? "seedbox Plex"
+            });
+        }
+
+        PlexServers = plexServers;
     }
 
     private static string Env(string name)
