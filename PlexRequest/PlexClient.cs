@@ -59,12 +59,17 @@ public sealed class PlexClient
 
                 foreach (var item in items)
                 {
-                    foreach (var guid in item.Guid ?? new List<PlexGuid>())
+                    if (section.Type == "movie")
                     {
-                        if (section.Type == "movie" && TryParseGuid(guid.Id, "tmdb", out var tmdb))
-                            _movieTmdbIds.Add(tmdb);
-                        else if (section.Type == "show" && TryParseGuid(guid.Id, "tvdb", out var tvdb) && !string.IsNullOrWhiteSpace(item.RatingKey))
-                            _showRatingKeyByTvdbId[tvdb] = item.RatingKey!;
+                        var tmdb = ExtractId(item, "tmdb", "com.plexapp.agents.themoviedb");
+                        if (tmdb.HasValue)
+                            _movieTmdbIds.Add(tmdb.Value);
+                    }
+                    else
+                    {
+                        var tvdb = ExtractId(item, "tvdb", "com.plexapp.agents.thetvdb");
+                        if (tvdb.HasValue && !string.IsNullOrWhiteSpace(item.RatingKey))
+                            _showRatingKeyByTvdbId[tvdb.Value] = item.RatingKey!;
                     }
                 }
             }
@@ -112,13 +117,39 @@ public sealed class PlexClient
         return result;
     }
 
+    /// <summary>
+    /// Finds the external ID from either the modern Guid array ("tvdb://78874")
+    /// or the legacy scalar guid ("com.plexapp.agents.thetvdb://78874?lang=en"),
+    /// depending on which metadata agent the library uses.
+    /// </summary>
+    private static int? ExtractId(PlexItem item, string modernScheme, string legacyScheme)
+    {
+        foreach (var g in item.Guid ?? new List<PlexGuid>())
+        {
+            if (TryParseGuid(g.Id, modernScheme, out var id))
+                return id;
+        }
+
+        if (TryParseGuid(item.LegacyGuid, modernScheme, out var modern))
+            return modern;
+        if (TryParseGuid(item.LegacyGuid, legacyScheme, out var legacy))
+            return legacy;
+
+        return null;
+    }
+
     private static bool TryParseGuid(string? guid, string scheme, out int id)
     {
         id = 0;
         if (string.IsNullOrEmpty(guid)) return false;
         var prefix = scheme + "://";
         if (!guid!.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return false;
-        return int.TryParse(guid.Substring(prefix.Length), out id) && id > 0;
+
+        var rest = guid.Substring(prefix.Length);
+        var query = rest.IndexOf('?');
+        if (query >= 0) rest = rest.Substring(0, query); // legacy guids end in ?lang=en
+
+        return int.TryParse(rest, out id) && id > 0;
     }
 
     // Case-sensitive: Plex returns both a scalar "guid" (string) and an array
@@ -148,6 +179,7 @@ public sealed class PlexClient
         [JsonPropertyName("index")] public int? Index { get; set; }
         [JsonPropertyName("leafCount")] public int? LeafCount { get; set; }
         [JsonPropertyName("Guid")] public List<PlexGuid>? Guid { get; set; }
+        [JsonPropertyName("guid")] public string? LegacyGuid { get; set; }
     }
     private sealed class PlexGuid { [JsonPropertyName("id")] public string? Id { get; set; } }
 }
