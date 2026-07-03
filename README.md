@@ -218,9 +218,15 @@ RADARR_QUALITY_PROFILE=HD - 720p/1080p
 ```
 PLEX_URL=http://plex.example.com:32400
 PLEX_TOKEN=...
+PLEX_PROXY=http://localhost:1055
+PLEX_NAME=DS1019
 ```
 
-Leave unset to disable the local library check.
+Leave `PLEX_URL`/`PLEX_TOKEN` unset to disable the local library check.
+`PLEX_PROXY` (optional) routes only Plex traffic through an HTTP proxy —
+useful when reaching home over a Tailscale userspace proxy. `PLEX_NAME`
+(optional) is the server name used in RESULT messages, e.g.
+"Already on DS1019 (S1-S8)"; defaults to "local Plex".
 
 These are typically sourced from a `.env` file when running under cron.
 

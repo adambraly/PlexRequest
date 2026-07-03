@@ -134,7 +134,7 @@ internal static class Program
                         if (plex != null && plex.HasMovie(r.Id.Value))
                         {
                             WriteRowOutcome(sheets, r, mediaKind, typeUpper, idKind,
-                                "Already on local Plex", RequestAction.OnPlex);
+                                $"Already on {cfg.PlexName}", RequestAction.OnPlex);
 
                             processed++;
                             break;
@@ -199,13 +199,13 @@ internal static class Program
                                 if (requestedSeasons.Count == 0)
                                 {
                                     WriteRowOutcome(sheets, r, mediaKind, typeUpper, idKind,
-                                        $"Already on local Plex ({SeasonSpec.Format(onPlex)})", RequestAction.OnPlex);
+                                        $"Already on {cfg.PlexName} ({SeasonSpec.Format(onPlex)})", RequestAction.OnPlex);
 
                                     processed++;
                                     break;
                                 }
 
-                                plexNote = $"{SeasonSpec.Format(onPlex)} on local Plex; ";
+                                plexNote = $"{SeasonSpec.Format(onPlex)} on {cfg.PlexName}; ";
                             }
                         }
 

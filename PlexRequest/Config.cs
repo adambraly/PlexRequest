@@ -30,6 +30,7 @@ public sealed class Config
     public string? PlexUrl { get; }
     public string? PlexToken { get; }
     public string? PlexProxy { get; }
+    public string PlexName { get; }
 
 
     public Config()
@@ -56,6 +57,7 @@ public sealed class Config
         PlexUrl = Environment.GetEnvironmentVariable("PLEX_URL")?.TrimEnd('/');
         PlexToken = Environment.GetEnvironmentVariable("PLEX_TOKEN");
         PlexProxy = Environment.GetEnvironmentVariable("PLEX_PROXY");
+        PlexName = Environment.GetEnvironmentVariable("PLEX_NAME") ?? "local Plex";
     }
 
     private static string Env(string name)
