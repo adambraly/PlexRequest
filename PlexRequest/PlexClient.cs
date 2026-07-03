@@ -4,6 +4,7 @@ using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace PlexRequest;
@@ -120,8 +121,13 @@ public sealed class PlexClient
         return int.TryParse(guid.Substring(prefix.Length), out id) && id > 0;
     }
 
+    // Case-sensitive: Plex returns both a scalar "guid" (string) and an array
+    // "Guid" (external IDs). Web defaults match case-insensitively and would map
+    // the scalar onto the array property, so matching must stay exact.
+    private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = false };
+
     private T? GetJson<T>(string path)
-        => _http.GetFromJsonAsync<T>(path).GetAwaiter().GetResult();
+        => _http.GetFromJsonAsync<T>(path, JsonOpts).GetAwaiter().GetResult();
 
     // ---------- DTOs ----------
     private sealed class PlexResponse<T> { [JsonPropertyName("MediaContainer")] public PlexMediaContainer<T>? MediaContainer { get; set; } }
